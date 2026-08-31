@@ -155,14 +155,22 @@ The generic worker runtime is intentionally small.
 Required responsibilities:
 
 ```text
-load ticket
-construct task-local model context
-expose sandbox workbench primitives
+accept an assigned worker identity and ticket
+construct task-local model context within a bounded observation budget
+expose sandbox workbench primitives with bounded output
 accept broker capability results
 maintain task-local state
 loop until completion/block/failure
 return bounded final result
 ```
+
+Worker identity is assigned by the dispatcher, not chosen by the worker, because the
+broker binds authority to it.
+
+A failed *task* is a report with status `failed`. A runtime error is a separate outcome:
+the two must not be conflated, or the orchestrator cannot tell "the work could not be
+done" from "the harness broke". Unparseable model output is corrected and retried a
+bounded number of times before the task is failed.
 
 The runtime does not require persistent identity or durable memory.
 
@@ -214,6 +222,13 @@ Responsibilities:
 - normalize provider results/failures;
 - record operational telemetry;
 - retain operational memory.
+
+### 7.0 Authority resolution
+
+The broker authorizes against a grant it resolves itself, keyed by ticket and worker
+identity. Callers present identity and intent; they do not present permissions. In the
+prototype this is an in-memory store written by the dispatcher; in a distributed
+deployment it is the point at which a signed capability token would be verified.
 
 ### 7.1 SLM responsibility
 

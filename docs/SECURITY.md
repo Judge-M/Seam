@@ -62,7 +62,9 @@ What the prototype does enforce today:
   workbench's configured ceiling; an operation needs both;
 - child processes start from a cleared environment with an explicit allowlist, so a
   worker cannot read ambient host credentials out of its own environment;
-- child processes are bounded by a timeout and killed when it expires.
+- child processes are bounded by a timeout and killed when it expires;
+- file reads and command output are capped and explicitly marked when truncated, so a
+  single operation cannot flood the worker's context.
 
 None of that is isolation. A worker permitted to execute processes can still reach the
 host, and these checks are the inner layer of a design whose outer layer is a real
@@ -90,6 +92,30 @@ envelope *and* be registered, and its arguments must satisfy the capability's de
 of JSON Schema (`crates/capability-broker/src/schema.rs`); capabilities needing richer
 validation should also validate inside the provider.
 
+## Broker Authority Direction
+
+Authority flows *to* the broker from a trusted source, never *from* the caller.
+
+```text
+Worker                          Broker
+  │  ticket_id                    │
+  │  worker identity              │
+  │  natural-language request     │
+  └──────────────────────────────▶│
+                                  ├─ resolve the grant for (ticket, worker)
+                                  ├─ enforce it
+                                  └─ deny on unknown ticket or worker mismatch
+```
+
+A worker never tells the broker what it is allowed to do. `TicketAuthorityStore` is the
+port the broker resolves grants through; the dispatcher registers a grant when it assigns
+a ticket to a worker, and revokes it when the ticket finishes. An unknown ticket or a
+worker that is not the assigned one is a denial, not an empty grant.
+
+For a distributed deployment this same seam is where an unforgeable capability token
+would be verified rather than looked up. The direction of trust is the part that matters,
+and it is fixed now so a network boundary cannot fossilize the wrong one.
+
 ## Ticket Authority
 
 The orchestrator proposes a ticket's authority envelope, but a model does not decide what
@@ -98,6 +124,16 @@ a worker may do. The kernel clamps every proposal against a deterministic
 capabilities are filtered to the deployment's grantable set. Clamping can only narrow, so
 an orchestrator that is confused — or steered by injected content — cannot escalate past
 the authority the deployment already configured.
+
+## Client Control-Plane Ownership
+
+A ticket id is not a capability. `cancel_ticket` and `update_ticket` verify that the
+ticket belongs to the conversation the command arrived on, and refuse unknown tickets
+rather than passing them through. This is enforced at the seam so that no present or
+future frontend has to remember to do it.
+
+There is no user authentication yet, so this is a semantic contract rather than a
+complete authorization story; it is the layer a real identity model would sit on top of.
 
 ## Credentials
 

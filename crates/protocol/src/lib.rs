@@ -66,10 +66,15 @@ pub struct CapabilityInvocation {
     pub arguments: Value,
 }
 
+/// What the worker sees when a capability succeeds.
+///
+/// Deliberately no provider field: which of Exa/GitHub-MCP/a REST adapter served the
+/// call is the broker's operational business, and a worker that can read it is a worker
+/// that can start depending on it. The broker records the provider in its telemetry and
+/// audit log instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityResult {
     pub capability: String,
-    pub provider: String,
     pub data: Value,
     #[serde(default)]
     pub metadata: Value,
@@ -81,6 +86,28 @@ pub enum WorkerStatus {
     Completed,
     Blocked,
     Failed,
+}
+
+/// Lifecycle state of a unit of work, shared by the kernel and the client API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkState {
+    Queued,
+    Running,
+    Completed,
+    Blocked,
+    Failed,
+    Cancelled,
+}
+
+impl From<&WorkerStatus> for WorkState {
+    fn from(status: &WorkerStatus) -> Self {
+        match status {
+            WorkerStatus::Completed => Self::Completed,
+            WorkerStatus::Blocked => Self::Blocked,
+            WorkerStatus::Failed => Self::Failed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
