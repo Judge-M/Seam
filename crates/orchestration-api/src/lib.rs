@@ -6,9 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use agent_protocol::{
-    ArtifactRef, ContextItem, ConversationId, Ticket, TicketId, WorkerReport, WorkerStatus,
-};
+use agent_protocol::{ArtifactRef, ContextItem, ConversationId, Ticket, TicketId, WorkerReport};
 use async_trait::async_trait;
 use model_gateway::ModelGateway;
 use orchestration_kernel::{
@@ -117,26 +115,9 @@ impl From<&Ticket> for TicketView {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TicketState {
-    Queued,
-    Running,
-    Completed,
-    Blocked,
-    Failed,
-    Cancelled,
-}
-
-impl From<&WorkerStatus> for TicketState {
-    fn from(status: &WorkerStatus) -> Self {
-        match status {
-            WorkerStatus::Completed => Self::Completed,
-            WorkerStatus::Blocked => Self::Blocked,
-            WorkerStatus::Failed => Self::Failed,
-        }
-    }
-}
+/// The client-facing name for a unit of work's lifecycle state. Shared with the kernel
+/// so the two cannot drift apart.
+pub use agent_protocol::WorkState as TicketState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageView {

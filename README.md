@@ -386,6 +386,10 @@ The prototype currently includes:
 - deterministic validation of SLM-produced arguments before any provider is invoked;
 - typed, provider-opaque failure codes at the worker boundary;
 - a deterministic ticket-authority policy the orchestrator cannot widen;
+- broker-side authority resolution: workers present identity, not permissions;
+- bounded worker context — windowed reads, capped output, capped observation budget;
+- task failure reported as a result rather than a runtime error;
+- ticket/conversation ownership enforced at the client seam;
 - initial broker operational telemetry/state;
 - a transport-agnostic orchestration UI API;
 - an in-memory read projection for development/testing.
@@ -473,4 +477,14 @@ The prototype exists to measure these claims rather than assume them.
 
 ## License
 
-The Rust workspace is currently configured for dual licensing under **MIT OR Apache-2.0**.
+Dual licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. This matches the `MIT OR Apache-2.0` declaration in the workspace manifest
+and the usual Rust convention.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in this work by you shall be dual licensed as above, without any additional
+terms or conditions.

@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use agent_protocol::{AuthorityEnvelope, LocalAuthority, Ticket};
 use async_trait::async_trait;
 use capability_broker::{
-    BrokerError, CapabilityBroker, CapabilityDescriptor, CapabilityProvider, ProviderScore,
-    SlmTranslator,
+    BrokerError, CapabilityBroker, CapabilityDescriptor, CapabilityProvider,
+    InMemoryTicketAuthorityStore, ProviderScore, SlmTranslator,
 };
 use model_gateway::LiteLlmClient;
 use serde_json::{Value, json};
@@ -52,7 +52,10 @@ async fn main() {
     ));
 
     let translator = Arc::new(SlmTranslator::new(broker_slm));
-    let mut broker = CapabilityBroker::new(translator);
+    // The broker resolves ticket authority from this store. A worker never passes its own
+    // permissions in; the dispatcher registers the grant below.
+    let authority_store = Arc::new(InMemoryTicketAuthorityStore::default());
+    let mut broker = CapabilityBroker::new(translator, Arc::clone(&authority_store));
     broker.register_capability(CapabilityDescriptor {
         name: "web.search".into(),
         description: "Search the public web for candidate sources or pages.".into(),
@@ -92,8 +95,19 @@ async fn main() {
         },
     };
 
-    match worker.run(ticket).await {
+    // Dispatch: identity is assigned here, and the grant is registered against it before
+    // the worker starts. This is the role a durable work controller plays in production.
+    let worker_id = Uuid::new_v4();
+    authority_store
+        .grant(ticket.id, worker_id, ticket.authority.clone())
+        .await;
+
+    let ticket_id = ticket.id;
+    match worker.run(worker_id, ticket).await {
         Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
-        Err(error) => eprintln!("worker failed: {error}"),
+        // `Err` now means the runtime could not continue; a failed task arrives as a
+        // report with status "failed".
+        Err(error) => eprintln!("worker runtime error: {error}"),
     }
+    authority_store.revoke(ticket_id).await;
 }

@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use agent_protocol::{
-    AuthorityEnvelope, CapabilityInvocation, CapabilityRequest, CapabilityResult,
+    AuthorityEnvelope, CapabilityInvocation, CapabilityRequest, CapabilityResult, TicketId,
+    WorkerId,
 };
 use async_trait::async_trait;
 use model_gateway::{ModelGateway, ModelMessage, ModelRequest};
@@ -65,6 +66,73 @@ impl BrokerError {
             Self::Translation(_) => "CAPABILITY_REQUEST_NOT_UNDERSTOOD",
             Self::InvalidArguments(_) => "CAPABILITY_ARGUMENTS_INVALID",
             Self::Provider(_) => "CAPABILITY_TEMPORARILY_UNAVAILABLE",
+        }
+    }
+}
+
+/// The broker's trusted source of ticket authority.
+///
+/// The privileged side of a trust boundary must not take the caller's word for what the
+/// caller may do. A worker presents only its identity and its ticket id; the broker
+/// resolves the authoritative grant through this port and enforces that.
+///
+/// For a distributed deployment this is also where an unforgeable capability token would
+/// be verified instead of looked up — the seam is the same either way, which is the point
+/// of introducing it before the prototype grows a network boundary.
+#[async_trait]
+pub trait TicketAuthorityStore: Send + Sync {
+    /// Resolve the grant for `ticket_id`, confirming `worker_id` is the worker actually
+    /// assigned to it. An unknown ticket or a mismatched worker is a denial, not an empty
+    /// grant, so a stale or forged pairing can never read as "authorized for nothing".
+    async fn authority_for(
+        &self,
+        ticket_id: TicketId,
+        worker_id: WorkerId,
+    ) -> Result<AuthorityEnvelope, BrokerError>;
+}
+
+/// Prototype authority source. A durable deployment would back this with the work
+/// controller's own store, or replace lookup with token verification.
+#[derive(Default)]
+pub struct InMemoryTicketAuthorityStore {
+    grants: RwLock<HashMap<TicketId, (WorkerId, AuthorityEnvelope)>>,
+}
+
+impl InMemoryTicketAuthorityStore {
+    /// Record the grant for a dispatched ticket. Called by whatever assigns work to a
+    /// worker — never by the worker itself.
+    pub async fn grant(
+        &self,
+        ticket_id: TicketId,
+        worker_id: WorkerId,
+        authority: AuthorityEnvelope,
+    ) {
+        self.grants
+            .write()
+            .await
+            .insert(ticket_id, (worker_id, authority));
+    }
+
+    /// Drop a grant once its ticket is finished or cancelled.
+    pub async fn revoke(&self, ticket_id: TicketId) {
+        self.grants.write().await.remove(&ticket_id);
+    }
+}
+
+#[async_trait]
+impl TicketAuthorityStore for InMemoryTicketAuthorityStore {
+    async fn authority_for(
+        &self,
+        ticket_id: TicketId,
+        worker_id: WorkerId,
+    ) -> Result<AuthorityEnvelope, BrokerError> {
+        let grants = self.grants.read().await;
+        match grants.get(&ticket_id) {
+            Some((assigned, authority)) if *assigned == worker_id => Ok(authority.clone()),
+            Some(_) => Err(BrokerError::Denied(
+                "worker is not assigned to this ticket".into(),
+            )),
+            None => Err(BrokerError::Denied("no grant for this ticket".into())),
         }
     }
 }
@@ -168,20 +236,23 @@ impl OperationalMemory {
     }
 }
 
-pub struct CapabilityBroker<T> {
+pub struct CapabilityBroker<T, A> {
     translator: Arc<T>,
+    authority: Arc<A>,
     capabilities: HashMap<String, CapabilityDescriptor>,
     providers: HashMap<String, Vec<Arc<dyn CapabilityProvider>>>,
     operational_memory: Arc<OperationalMemory>,
 }
 
-impl<T> CapabilityBroker<T>
+impl<T, A> CapabilityBroker<T, A>
 where
     T: CapabilityTranslator + 'static,
+    A: TicketAuthorityStore + 'static,
 {
-    pub fn new(translator: Arc<T>) -> Self {
+    pub fn new(translator: Arc<T>, authority: Arc<A>) -> Self {
         Self {
             translator,
+            authority,
             capabilities: HashMap::new(),
             providers: HashMap::new(),
             operational_memory: Arc::new(OperationalMemory::default()),
@@ -213,11 +284,21 @@ where
             .collect()
     }
 
+    /// Execute one capability request.
+    ///
+    /// The request carries identity and intent only. Authority is resolved here, from the
+    /// broker's own trusted source, so a compromised or buggy worker cannot widen its own
+    /// grant by asking.
     pub async fn execute(
         &self,
         request: &CapabilityRequest,
-        authority: &AuthorityEnvelope,
     ) -> Result<CapabilityResult, BrokerError> {
+        let authority = self
+            .authority
+            .authority_for(request.ticket_id, request.worker_id)
+            .await?;
+        let authority = &authority;
+
         let candidates = self.candidates(authority);
         if candidates.is_empty() {
             return Err(BrokerError::CapabilityGap);
@@ -271,7 +352,6 @@ where
                 );
                 Ok(CapabilityResult {
                     capability: invocation.capability,
-                    provider: provider.id().to_owned(),
                     data,
                     metadata: serde_json::json!({}),
                 })
@@ -352,128 +432,178 @@ mod tests {
         }
     }
 
-    fn authority(capabilities: &[&str]) -> AuthorityEnvelope {
+    fn envelope(capabilities: &[&str]) -> AuthorityEnvelope {
         AuthorityEnvelope {
             local: LocalAuthority::default(),
             external_capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
         }
     }
 
-    fn request() -> CapabilityRequest {
-        CapabilityRequest {
-            worker_id: Uuid::new_v4(),
-            ticket_id: Uuid::new_v4(),
-            request: "find the seam docs".into(),
+    fn search_invocation() -> CapabilityInvocation {
+        CapabilityInvocation {
+            capability: "web.search".into(),
+            arguments: json!({"query": "seam"}),
         }
     }
 
-    fn broker_with(
-        invocation: CapabilityInvocation,
+    struct Harness {
+        broker: CapabilityBroker<FixedTranslator, InMemoryTicketAuthorityStore>,
+        store: Arc<InMemoryTicketAuthorityStore>,
         calls: Arc<AtomicUsize>,
-    ) -> CapabilityBroker<FixedTranslator> {
-        let mut broker = CapabilityBroker::new(Arc::new(FixedTranslator(invocation)));
-        broker.register_capability(search_descriptor());
-        broker.register_provider(Arc::new(RecordingProvider {
-            id: "demo.search",
-            score: ProviderScore {
-                estimated_cost: 0.0,
-                estimated_latency_ms: 5,
-                health: 1.0,
-            },
-            calls,
-        }));
-        broker
+        ticket_id: TicketId,
+        worker_id: WorkerId,
+    }
+
+    impl Harness {
+        fn new(invocation: CapabilityInvocation) -> Self {
+            let store = Arc::new(InMemoryTicketAuthorityStore::default());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut broker =
+                CapabilityBroker::new(Arc::new(FixedTranslator(invocation)), Arc::clone(&store));
+            broker.register_capability(search_descriptor());
+            broker.register_provider(Arc::new(RecordingProvider {
+                id: "demo.search",
+                score: ProviderScore {
+                    estimated_cost: 0.0,
+                    estimated_latency_ms: 5,
+                    health: 1.0,
+                },
+                calls: Arc::clone(&calls),
+            }));
+            Self {
+                broker,
+                store,
+                calls,
+                ticket_id: Uuid::new_v4(),
+                worker_id: Uuid::new_v4(),
+            }
+        }
+
+        async fn grant(&self, capabilities: &[&str]) {
+            self.store
+                .grant(self.ticket_id, self.worker_id, envelope(capabilities))
+                .await;
+        }
+
+        fn request(&self) -> CapabilityRequest {
+            CapabilityRequest {
+                worker_id: self.worker_id,
+                ticket_id: self.ticket_id,
+                request: "find the seam docs".into(),
+            }
+        }
+
+        async fn execute(&self) -> Result<CapabilityResult, BrokerError> {
+            self.broker.execute(&self.request()).await
+        }
+
+        fn provider_calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
     }
 
     #[tokio::test]
     async fn executes_a_valid_authorized_invocation() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let broker = broker_with(
-            CapabilityInvocation {
-                capability: "web.search".into(),
-                arguments: json!({"query": "seam"}),
-            },
-            Arc::clone(&calls),
-        );
+        let harness = Harness::new(search_invocation());
+        harness.grant(&["web.search"]).await;
 
-        let result = broker
-            .execute(&request(), &authority(&["web.search"]))
+        let result = harness.execute().await.expect("execute");
+        assert_eq!(result.capability, "web.search");
+        assert_eq!(harness.provider_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_worker_cannot_act_on_a_ticket_it_was_not_assigned() {
+        let harness = Harness::new(search_invocation());
+        // The grant belongs to a different worker.
+        harness
+            .store
+            .grant(harness.ticket_id, Uuid::new_v4(), envelope(&["web.search"]))
+            .await;
+
+        let error = harness.execute().await.expect_err("must be denied");
+        assert!(matches!(error, BrokerError::Denied(_)), "{error}");
+        assert_eq!(harness.provider_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_registered_grant_is_denied() {
+        let harness = Harness::new(search_invocation());
+        // Nothing granted: the broker has no record of this ticket.
+        let error = harness.execute().await.expect_err("must be denied");
+        assert!(matches!(error, BrokerError::Denied(_)), "{error}");
+        assert_eq!(harness.provider_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_grant_stops_further_calls() {
+        let harness = Harness::new(search_invocation());
+        harness.grant(&["web.search"]).await;
+        harness.execute().await.expect("first call succeeds");
+
+        harness.store.revoke(harness.ticket_id).await;
+
+        let error = harness
+            .execute()
             .await
-            .expect("execute");
-        assert_eq!(result.provider, "demo.search");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+            .expect_err("must be denied after revoke");
+        assert!(matches!(error, BrokerError::Denied(_)), "{error}");
+        assert_eq!(harness.provider_calls(), 1, "no provider call after revoke");
     }
 
     #[tokio::test]
     async fn invalid_slm_arguments_never_reach_a_provider() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let broker = broker_with(
-            CapabilityInvocation {
-                capability: "web.search".into(),
-                // No `query`, plus a property the schema does not permit.
-                arguments: json!({"command": "rm -rf /"}),
-            },
-            Arc::clone(&calls),
-        );
+        let harness = Harness::new(CapabilityInvocation {
+            capability: "web.search".into(),
+            // No `query`, plus a property the schema does not permit.
+            arguments: json!({"command": "rm -rf /"}),
+        });
+        harness.grant(&["web.search"]).await;
 
-        let error = broker
-            .execute(&request(), &authority(&["web.search"]))
+        let error = harness
+            .execute()
             .await
-            .expect_err("invalid arguments must be refused");
+            .expect_err("invalid arguments refused");
         assert!(matches!(error, BrokerError::InvalidArguments(_)), "{error}");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "provider must not be invoked"
-        );
+        assert_eq!(harness.provider_calls(), 0, "provider must not be invoked");
     }
 
     #[tokio::test]
-    async fn a_capability_outside_the_ticket_authority_is_denied() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        // The SLM names a capability the ticket does not carry.
-        let broker = broker_with(
-            CapabilityInvocation {
-                capability: "infrastructure.host.inspect".into(),
-                arguments: json!({}),
-            },
-            Arc::clone(&calls),
-        );
+    async fn a_capability_outside_the_granted_authority_is_denied() {
+        // The SLM names a capability the ticket's grant does not carry.
+        let harness = Harness::new(CapabilityInvocation {
+            capability: "infrastructure.host.inspect".into(),
+            arguments: json!({}),
+        });
+        harness.grant(&["web.search"]).await;
 
-        let error = broker
-            .execute(&request(), &authority(&["web.search"]))
+        let error = harness
+            .execute()
             .await
-            .expect_err("unauthorized capability must be denied");
+            .expect_err("unauthorized capability");
         assert!(matches!(error, BrokerError::Denied(_)), "{error}");
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.provider_calls(), 0);
     }
 
     #[tokio::test]
-    async fn a_ticket_with_no_capabilities_reports_a_gap() {
-        let broker = broker_with(
-            CapabilityInvocation {
-                capability: "web.search".into(),
-                arguments: json!({"query": "seam"}),
-            },
-            Arc::new(AtomicUsize::new(0)),
-        );
+    async fn a_grant_with_no_capabilities_reports_a_gap() {
+        let harness = Harness::new(search_invocation());
+        harness.grant(&[]).await;
 
-        let error = broker
-            .execute(&request(), &authority(&[]))
-            .await
-            .expect_err("no authority means no candidates");
+        let error = harness.execute().await.expect_err("no candidates");
         assert!(matches!(error, BrokerError::CapabilityGap), "{error}");
     }
 
     #[tokio::test]
     async fn the_cheapest_healthy_provider_is_selected_deterministically() {
+        let store = Arc::new(InMemoryTicketAuthorityStore::default());
         let cheap = Arc::new(AtomicUsize::new(0));
         let expensive = Arc::new(AtomicUsize::new(0));
 
-        let mut broker = CapabilityBroker::new(Arc::new(FixedTranslator(CapabilityInvocation {
-            capability: "web.search".into(),
-            arguments: json!({"query": "seam"}),
-        })));
+        let mut broker = CapabilityBroker::new(
+            Arc::new(FixedTranslator(search_invocation())),
+            Arc::clone(&store),
+        );
         broker.register_capability(search_descriptor());
         broker.register_provider(Arc::new(RecordingProvider {
             id: "expensive",
@@ -494,32 +624,34 @@ mod tests {
             calls: Arc::clone(&cheap),
         }));
 
-        let result = broker
-            .execute(&request(), &authority(&["web.search"]))
+        let (ticket_id, worker_id) = (Uuid::new_v4(), Uuid::new_v4());
+        store
+            .grant(ticket_id, worker_id, envelope(&["web.search"]))
+            .await;
+
+        broker
+            .execute(&CapabilityRequest {
+                worker_id,
+                ticket_id,
+                request: "search".into(),
+            })
             .await
             .expect("execute");
-        assert_eq!(result.provider, "cheap");
+
         assert_eq!(cheap.load(Ordering::SeqCst), 1);
         assert_eq!(expensive.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn successful_calls_are_recorded_in_operational_memory() {
-        let broker = broker_with(
-            CapabilityInvocation {
-                capability: "web.search".into(),
-                arguments: json!({"query": "seam"}),
-            },
-            Arc::new(AtomicUsize::new(0)),
-        );
-        let memory = broker.operational_memory();
+        let harness = Harness::new(search_invocation());
+        harness.grant(&["web.search"]).await;
+        let memory = harness.broker.operational_memory();
 
-        broker
-            .execute(&request(), &authority(&["web.search"]))
-            .await
-            .expect("execute");
+        harness.execute().await.expect("execute");
 
         let snapshot = memory.snapshot().await;
+        // The provider is named in telemetry, which is exactly where it should be.
         let telemetry = snapshot.get("demo.search").expect("telemetry");
         assert_eq!(telemetry.calls, 1);
         assert_eq!(telemetry.failures, 0);

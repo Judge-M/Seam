@@ -1,7 +1,11 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::{Arc, Mutex},
+};
 
 use agent_protocol::{
-    AuthorityEnvelope, ContextItem, ConversationId, LocalAuthority, Ticket, TicketId, WorkerReport,
+    AuthorityEnvelope, ContextItem, ConversationId, LocalAuthority, Ticket, TicketId, WorkState,
+    WorkerReport,
 };
 use async_trait::async_trait;
 use model_gateway::{ModelGateway, ModelMessage, ModelRequest};
@@ -22,6 +26,8 @@ pub enum KernelError {
     Work(String),
     #[error("conversation store error: {0}")]
     Store(String),
+    #[error("ticket {0} does not belong to this conversation")]
+    TicketNotInConversation(TicketId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +66,30 @@ pub trait WorkController: Send + Sync {
         context: Vec<ContextItem>,
     ) -> Result<(), KernelError>;
     async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError>;
+
+    /// Work still in flight for a conversation, for orchestrator context assembly.
+    async fn active_work(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<ActiveWork>, KernelError>;
+
+    /// Which conversation a ticket belongs to, for ownership checks. `None` if unknown.
+    async fn ticket_owner(
+        &self,
+        ticket_id: TicketId,
+    ) -> Result<Option<ConversationId>, KernelError>;
+}
+
+/// One unit of work as the orchestrator sees it.
+///
+/// Deliberately three fields: the orchestrator needs to know what work it has in flight
+/// to use `update` and `cancel` meaningfully, and nothing more. Worker logs, tool state
+/// and raw observations stay below the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWork {
+    pub id: TicketId,
+    pub objective: String,
+    pub state: WorkState,
 }
 
 /// Deterministic ceiling on the authority a ticket may carry.
@@ -240,9 +270,11 @@ where
     /// Direct control-plane cancellation for UI/CLI clients. No model round-trip is required.
     pub async fn cancel_ticket(
         &self,
-        _conversation_id: ConversationId,
+        conversation_id: ConversationId,
         ticket_id: TicketId,
     ) -> Result<KernelOutcome, KernelError> {
+        self.ensure_ticket_in_conversation(conversation_id, ticket_id)
+            .await?;
         self.work.cancel(ticket_id).await?;
         Ok(KernelOutcome {
             user_messages: Vec::new(),
@@ -253,15 +285,33 @@ where
     /// Direct control-plane ticket context update. This is not worker memory; it changes the active ticket.
     pub async fn update_ticket(
         &self,
-        _conversation_id: ConversationId,
+        conversation_id: ConversationId,
         ticket_id: TicketId,
         context: Vec<ContextItem>,
     ) -> Result<KernelOutcome, KernelError> {
+        self.ensure_ticket_in_conversation(conversation_id, ticket_id)
+            .await?;
         self.work.update(ticket_id, context.clone()).await?;
         Ok(KernelOutcome {
             user_messages: Vec::new(),
             ticket_events: vec![KernelTicketEvent::Updated { ticket_id, context }],
         })
+    }
+
+    /// A ticket id is not a capability. Clients hold ids for one conversation, so the
+    /// seam checks the pairing here rather than trusting every future frontend to
+    /// remember to.
+    async fn ensure_ticket_in_conversation(
+        &self,
+        conversation_id: ConversationId,
+        ticket_id: TicketId,
+    ) -> Result<(), KernelError> {
+        match self.work.ticket_owner(ticket_id).await? {
+            Some(owner) if owner == conversation_id => Ok(()),
+            // An unknown ticket is refused rather than passed through: "we lost track of
+            // it" must not read as "anyone may cancel it".
+            _ => Err(KernelError::TicketNotInConversation(ticket_id)),
+        }
     }
 
     async fn invoke(
@@ -291,6 +341,10 @@ Your only control-plane actions are:
 - update a ticket;
 - cancel a ticket.
 
+`active_work` lists the tickets you have created that are still in flight, with their
+ids and states. Use those ids when updating or cancelling. It is a summary of your own
+work, not worker logs — a worker's findings reach you only through its report.
+
 Workers have NO durable memory. A worker knows only what you put in its ticket plus its task-local observations. Tickets must therefore be self-contained.
 
 A ticket's authority is a request, not a grant. The kernel clamps every ticket to a
@@ -311,6 +365,7 @@ Return JSON:
 
         let context = json!({
             "retrieved_memories": memories,
+            "active_work": self.work.active_work(conversation_id).await?,
             "external_event": event,
         });
 
@@ -433,24 +488,43 @@ mod tests {
         }
     }
 
+    /// Records what was submitted, and delegates state/ownership to the real in-memory
+    /// controller so the ownership and active-work paths are exercised as shipped.
     #[derive(Default)]
-    struct RecordingWork(Mutex<Vec<Ticket>>);
+    struct RecordingWork {
+        submitted: Mutex<Vec<Ticket>>,
+        inner: InMemoryWorkController,
+        cancelled: Mutex<Vec<TicketId>>,
+    }
 
     #[async_trait]
     impl WorkController for RecordingWork {
         async fn submit(&self, ticket: Ticket) -> Result<(), KernelError> {
-            self.0.lock().expect("lock").push(ticket);
-            Ok(())
+            self.submitted.lock().expect("lock").push(ticket.clone());
+            self.inner.submit(ticket).await
         }
         async fn update(
             &self,
-            _ticket_id: TicketId,
-            _context: Vec<ContextItem>,
+            ticket_id: TicketId,
+            context: Vec<ContextItem>,
         ) -> Result<(), KernelError> {
-            Ok(())
+            self.inner.update(ticket_id, context).await
         }
-        async fn cancel(&self, _ticket_id: TicketId) -> Result<(), KernelError> {
-            Ok(())
+        async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError> {
+            self.cancelled.lock().expect("lock").push(ticket_id);
+            self.inner.cancel(ticket_id).await
+        }
+        async fn active_work(
+            &self,
+            conversation_id: ConversationId,
+        ) -> Result<Vec<ActiveWork>, KernelError> {
+            self.inner.active_work(conversation_id).await
+        }
+        async fn ticket_owner(
+            &self,
+            ticket_id: TicketId,
+        ) -> Result<Option<ConversationId>, KernelError> {
+            self.inner.ticket_owner(ticket_id).await
         }
     }
 
@@ -495,7 +569,7 @@ mod tests {
             .await
             .expect("turn");
 
-        let tickets = work.0.lock().expect("lock");
+        let tickets = work.submitted.lock().expect("lock");
         tickets.first().cloned().expect("a ticket was submitted")
     }
 
@@ -552,6 +626,235 @@ mod tests {
         );
     }
 
+    /// Builds a kernel whose orchestrator only ever replies, so control-plane calls can
+    /// be tested without the model driving them.
+    fn quiet_kernel() -> (
+        OrchestrationKernel<ScriptedModel, NullMemory, NullStore, RecordingWork>,
+        Arc<RecordingWork>,
+    ) {
+        let work = Arc::new(RecordingWork::default());
+        let reply = json!({"actions": [{"type": "respond", "text": "ok"}]}).to_string();
+        let kernel = OrchestrationKernel::new(
+            Arc::new(ScriptedModel(reply)),
+            Arc::new(NullMemory),
+            Arc::new(NullStore),
+            Arc::clone(&work),
+            TicketAuthorityPolicy::read_only(),
+        );
+        (kernel, work)
+    }
+
+    #[tokio::test]
+    async fn a_ticket_cannot_be_cancelled_from_another_conversation() {
+        let work = Arc::new(RecordingWork::default());
+        let owner = Uuid::new_v4();
+        let ticket_id = Uuid::new_v4();
+        work.submit(Ticket {
+            id: ticket_id,
+            conversation_id: owner,
+            objective: "inspect CI".into(),
+            context: Vec::new(),
+            constraints: Vec::new(),
+            deliverable: "a cause".into(),
+            authority: AuthorityEnvelope::default(),
+        })
+        .await
+        .expect("submit");
+
+        let kernel = OrchestrationKernel::new(
+            Arc::new(ScriptedModel(String::new())),
+            Arc::new(NullMemory),
+            Arc::new(NullStore),
+            Arc::clone(&work),
+            TicketAuthorityPolicy::read_only(),
+        );
+
+        let intruder = Uuid::new_v4();
+        let error = kernel
+            .cancel_ticket(intruder, ticket_id)
+            .await
+            .expect_err("a foreign conversation must not cancel this ticket");
+        assert!(
+            matches!(error, KernelError::TicketNotInConversation(id) if id == ticket_id),
+            "{error}"
+        );
+        assert!(
+            work.cancelled.lock().expect("lock").is_empty(),
+            "the controller must never have been called"
+        );
+
+        // The owning conversation still can.
+        kernel
+            .cancel_ticket(owner, ticket_id)
+            .await
+            .expect("owner cancels");
+        assert_eq!(work.cancelled.lock().expect("lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_ticket_is_refused_rather_than_passed_through() {
+        let (kernel, work) = quiet_kernel();
+        let error = kernel
+            .cancel_ticket(Uuid::new_v4(), Uuid::new_v4())
+            .await
+            .expect_err("unknown ticket must be refused");
+        assert!(
+            matches!(error, KernelError::TicketNotInConversation(_)),
+            "{error}"
+        );
+        assert!(work.cancelled.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn updating_a_ticket_from_another_conversation_is_refused() {
+        let (kernel, work) = quiet_kernel();
+        let owner = Uuid::new_v4();
+        let ticket = submit_under_kernel(&kernel, owner).await;
+
+        let error = kernel
+            .update_ticket(Uuid::new_v4(), ticket, vec![])
+            .await
+            .expect_err("foreign update must be refused");
+        assert!(
+            matches!(error, KernelError::TicketNotInConversation(_)),
+            "{error}"
+        );
+
+        kernel
+            .update_ticket(owner, ticket, vec![])
+            .await
+            .expect("the owner may update");
+        let _ = work;
+    }
+
+    /// Submit a ticket directly through the controller and return its id.
+    async fn submit_under_kernel(
+        kernel: &OrchestrationKernel<ScriptedModel, NullMemory, NullStore, RecordingWork>,
+        conversation_id: ConversationId,
+    ) -> TicketId {
+        let ticket_id = Uuid::new_v4();
+        kernel
+            .work
+            .submit(Ticket {
+                id: ticket_id,
+                conversation_id,
+                objective: "inspect CI".into(),
+                context: Vec::new(),
+                constraints: Vec::new(),
+                deliverable: "a cause".into(),
+                authority: AuthorityEnvelope::default(),
+            })
+            .await
+            .expect("submit");
+        ticket_id
+    }
+
+    #[tokio::test]
+    async fn active_work_is_scoped_to_its_conversation_and_drops_when_finished() {
+        let work = InMemoryWorkController::default();
+        let (mine, theirs) = (Uuid::new_v4(), Uuid::new_v4());
+        let mine_ticket = Uuid::new_v4();
+
+        for (id, conversation) in [(mine_ticket, mine), (Uuid::new_v4(), theirs)] {
+            work.submit(Ticket {
+                id,
+                conversation_id: conversation,
+                objective: "inspect CI".into(),
+                context: Vec::new(),
+                constraints: Vec::new(),
+                deliverable: "a cause".into(),
+                authority: AuthorityEnvelope::default(),
+            })
+            .await
+            .expect("submit");
+        }
+
+        let active = work.active_work(mine).await.expect("active");
+        assert_eq!(active.len(), 1, "only this conversation's work");
+        assert_eq!(active[0].id, mine_ticket);
+        assert_eq!(active[0].state, WorkState::Queued);
+
+        work.mark_running(mine_ticket);
+        assert_eq!(
+            work.active_work(mine).await.expect("active")[0].state,
+            WorkState::Running
+        );
+
+        // A finished ticket leaves the orchestrator's active-work view.
+        work.apply_report(&WorkerReport {
+            worker_id: Uuid::new_v4(),
+            ticket_id: mine_ticket,
+            conversation_id: mine,
+            status: agent_protocol::WorkerStatus::Completed,
+            summary: "done".into(),
+            artifacts: Vec::new(),
+            notes: Vec::new(),
+        });
+        assert!(work.active_work(mine).await.expect("active").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_orchestrator_is_shown_its_own_active_work() {
+        // A model that echoes the context it was given, so we can assert on it.
+        struct EchoModel(Arc<Mutex<Vec<String>>>);
+
+        #[async_trait]
+        impl ModelGateway for EchoModel {
+            async fn complete(
+                &self,
+                request: ModelRequest,
+            ) -> Result<String, model_gateway::ModelError> {
+                let seen = request
+                    .messages
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect::<Vec<_>>();
+                self.0.lock().expect("lock").extend(seen);
+                Ok(json!({"actions": []}).to_string())
+            }
+        }
+
+        let work = Arc::new(RecordingWork::default());
+        let conversation = Uuid::new_v4();
+        let ticket_id = Uuid::new_v4();
+        work.submit(Ticket {
+            id: ticket_id,
+            conversation_id: conversation,
+            objective: "inspect the failing CI job".into(),
+            context: Vec::new(),
+            constraints: Vec::new(),
+            deliverable: "a root cause".into(),
+            authority: AuthorityEnvelope::default(),
+        })
+        .await
+        .expect("submit");
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kernel = OrchestrationKernel::new(
+            Arc::new(EchoModel(Arc::clone(&seen))),
+            Arc::new(NullMemory),
+            Arc::new(NullStore),
+            Arc::clone(&work),
+            TicketAuthorityPolicy::read_only(),
+        );
+
+        kernel
+            .handle_user_turn(conversation, "how is that going?")
+            .await
+            .expect("turn");
+
+        let context = seen.lock().expect("lock").join("\n");
+        assert!(context.contains("active_work"), "context lacks active work");
+        assert!(
+            context.contains("inspect the failing CI job"),
+            "the orchestrator cannot see its own in-flight ticket"
+        );
+        assert!(
+            context.contains(&ticket_id.to_string()),
+            "the orchestrator needs the id to update or cancel"
+        );
+    }
+
     #[test]
     fn clamping_never_widens_authority() {
         let policy = TicketAuthorityPolicy::default().with_capabilities(["web.search"]);
@@ -560,5 +863,106 @@ mod tests {
             clamped.external_capabilities.is_empty(),
             "an unasked-for capability is not added"
         );
+    }
+}
+
+/// Prototype work controller: tracks ticket ownership and state in memory.
+///
+/// It exists so the kernel's ownership and active-work reads have a real implementation
+/// to run against. Phase 5 replaces it with a durable runtime; the trait is the seam
+/// that makes that a swap rather than a rewrite.
+#[derive(Default)]
+pub struct InMemoryWorkController {
+    tickets: Mutex<HashMap<TicketId, TrackedTicket>>,
+}
+
+struct TrackedTicket {
+    conversation_id: ConversationId,
+    objective: String,
+    state: WorkState,
+}
+
+impl InMemoryWorkController {
+    /// Mark a ticket as started. Called by whatever dispatches work to a worker.
+    pub fn mark_running(&self, ticket_id: TicketId) {
+        self.set_state(ticket_id, WorkState::Running);
+    }
+
+    /// Apply a worker's terminal status to its ticket.
+    pub fn apply_report(&self, report: &WorkerReport) {
+        self.set_state(report.ticket_id, WorkState::from(&report.status));
+    }
+
+    fn set_state(&self, ticket_id: TicketId, state: WorkState) {
+        if let Ok(mut tickets) = self.tickets.lock()
+            && let Some(tracked) = tickets.get_mut(&ticket_id)
+        {
+            tracked.state = state;
+        }
+    }
+}
+
+#[async_trait]
+impl WorkController for InMemoryWorkController {
+    async fn submit(&self, ticket: Ticket) -> Result<(), KernelError> {
+        self.tickets
+            .lock()
+            .map_err(|_| KernelError::Work("work controller lock poisoned".into()))?
+            .insert(
+                ticket.id,
+                TrackedTicket {
+                    conversation_id: ticket.conversation_id,
+                    objective: ticket.objective,
+                    state: WorkState::Queued,
+                },
+            );
+        Ok(())
+    }
+
+    async fn update(
+        &self,
+        _ticket_id: TicketId,
+        _context: Vec<ContextItem>,
+    ) -> Result<(), KernelError> {
+        Ok(())
+    }
+
+    async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError> {
+        self.set_state(ticket_id, WorkState::Cancelled);
+        Ok(())
+    }
+
+    async fn active_work(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<ActiveWork>, KernelError> {
+        let tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| KernelError::Work("work controller lock poisoned".into()))?;
+        Ok(tickets
+            .iter()
+            .filter(|(_, tracked)| {
+                tracked.conversation_id == conversation_id
+                    && matches!(tracked.state, WorkState::Queued | WorkState::Running)
+            })
+            .map(|(id, tracked)| ActiveWork {
+                id: *id,
+                objective: tracked.objective.clone(),
+                state: tracked.state,
+            })
+            .collect())
+    }
+
+    async fn ticket_owner(
+        &self,
+        ticket_id: TicketId,
+    ) -> Result<Option<ConversationId>, KernelError> {
+        Ok(self
+            .tickets
+            .lock()
+            .map_err(|_| KernelError::Work("work controller lock poisoned".into()))?
+            .get(&ticket_id)
+            .map(|tracked| tracked.conversation_id))
     }
 }

@@ -15,6 +15,18 @@ The near-term goal is not to accumulate features. It is to validate whether Seam
 Still open from this phase, deliberately deferred to the phases that own them: broker
 cost/quota/rate ceilings (Phase 2) and a real isolation boundary (Phase 3).
 
+## Phase 0.5 — Pre-Benchmark Hardening — **done**
+
+Prerequisites for Phase 1 measurements being meaningful:
+
+- [x] bounded worker context: windowed file reads, capped command output, capped
+      per-observation and per-window budgets;
+- [x] worker failure semantics: task failure is a `failed` report, not a runtime error;
+- [x] broker authority resolved from a trusted source rather than supplied by the caller;
+- [x] active-work context for the orchestrator's own control plane;
+- [x] ticket/conversation ownership enforced at the API seam;
+- [x] provider identity removed from the worker-visible result.
+
 ## Phase 1 — Worker Runtime Baseline
 
 Implement and benchmark the minimal generic worker:
