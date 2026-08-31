@@ -1,0 +1,16 @@
+[package]
+name = "agent-architecture-demo"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-protocol = { path = "../../crates/protocol" }
+model-gateway = { path = "../../crates/model-gateway" }
+capability-broker = { path = "../../crates/capability-broker" }
+worker-runtime = { path = "../../crates/worker-runtime" }
+orchestration-kernel = { path = "../../crates/orchestration-kernel" }
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
