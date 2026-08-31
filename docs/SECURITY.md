@@ -53,13 +53,28 @@ external access:        Capability Broker only
 
 The Rust path restrictions in the prototype are convenience checks, not a security sandbox.
 
+What the prototype does enforce today:
+
+- workspace-relative paths only — absolute paths and parent traversal are refused;
+- symlinks are resolved on the final path component, so a link inside the workspace
+  cannot redirect a read or a write outside it;
+- every local operation is checked against the ticket's `LocalAuthority` *and* the
+  workbench's configured ceiling; an operation needs both;
+- child processes start from a cleared environment with an explicit allowlist, so a
+  worker cannot read ambient host credentials out of its own environment;
+- child processes are bounded by a timeout and killed when it expires.
+
+None of that is isolation. A worker permitted to execute processes can still reach the
+host, and these checks are the inner layer of a design whose outer layer is a real
+sandbox.
+
 ## Capability Broker
 
 The Capability Broker is a privileged boundary and should enforce:
 
 - caller/ticket identity;
 - explicit capability authority;
-- argument validation;
+- argument validation against the capability's declared schema;
 - provider policy;
 - cost/rate/quota ceilings;
 - credential scoping;
@@ -68,6 +83,21 @@ The Capability Broker is a privileged boundary and should enforce:
 - safe retry behavior.
 
 The broker's SLM output must be treated as untrusted structured input and validated before execution.
+
+The prototype does this: the selected capability must appear in the ticket's authority
+envelope *and* be registered, and its arguments must satisfy the capability's declared
+`argument_schema` before any provider is invoked. Schema coverage is a documented subset
+of JSON Schema (`crates/capability-broker/src/schema.rs`); capabilities needing richer
+validation should also validate inside the provider.
+
+## Ticket Authority
+
+The orchestrator proposes a ticket's authority envelope, but a model does not decide what
+a worker may do. The kernel clamps every proposal against a deterministic
+`TicketAuthorityPolicy`: local authority is intersected bit by bit and external
+capabilities are filtered to the deployment's grantable set. Clamping can only narrow, so
+an orchestrator that is confused — or steered by injected content — cannot escalate past
+the authority the deployment already configured.
 
 ## Credentials
 
@@ -113,3 +143,7 @@ This reduces accidental leakage of provider topology and credentials while keepi
 ## Non-Goals
 
 The current prototype does not yet provide a production sandbox, secret broker, complete authorization engine, hardened network proxy, or production audit ledger. Those are required before treating Seam as a secure execution environment.
+
+Also still missing: broker cost/quota/rate ceilings, credential scoping at the provider
+layer, and a durable audit trail. Broker telemetry is in-memory and per-process, and the
+audit events are `tracing` records rather than a ledger.

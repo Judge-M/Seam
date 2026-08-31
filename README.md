@@ -8,7 +8,7 @@ The primary model keeps the big picture and delegates work. Small task-scoped wo
 
 The result is an architecture designed around **shorter context, informational least privilege, replaceable infrastructure, and explicit seams between responsibilities**.
 
-> **Status:** experimental architecture prototype. The current Rust workspace demonstrates the core contracts and boundaries. It is not yet production-ready, and the current snapshot has not been compiler-verified in this environment.
+> **Status:** experimental architecture prototype. The current Rust workspace demonstrates the core contracts and boundaries. It builds clean and is formatted, linted (`clippy -D warnings`) and tested in CI on every pull request. It is not yet production-ready — see [Security Model](docs/SECURITY.md) for what the prototype does and does not enforce.
 
 ---
 
@@ -383,6 +383,9 @@ The prototype currently includes:
 - workspace-local file/process primitives;
 - a Capability Broker with a narrow SLM translation boundary;
 - deterministic capability authorization/provider selection;
+- deterministic validation of SLM-produced arguments before any provider is invoked;
+- typed, provider-opaque failure codes at the worker boundary;
+- a deterministic ticket-authority policy the orchestrator cannot widen;
 - initial broker operational telemetry/state;
 - a transport-agnostic orchestration UI API;
 - an in-memory read projection for development/testing.
@@ -390,6 +393,11 @@ The prototype currently includes:
 ### Important limitation
 
 Filesystem path checks in the worker runtime are **not an OS sandbox**.
+
+They refuse absolute paths, parent traversal, and symlinks that resolve outside the
+workspace, and every operation is gated on the ticket's authority as well as the
+workbench's own ceiling. That is defence in depth, not isolation: a worker that can
+execute processes can still reach the host.
 
 Production workers must run inside a real isolation boundary such as a container, microVM, sandbox service, or equivalent environment with:
 

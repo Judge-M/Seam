@@ -2,15 +2,18 @@
 
 The near-term goal is not to accumulate features. It is to validate whether Seam's minimal separations actually produce better agent behavior, cost, context discipline and security.
 
-## Phase 0 — Make the Prototype Executable
+## Phase 0 — Make the Prototype Executable — **done**
 
-- install/use a Rust toolchain in CI;
-- `cargo fmt --check`;
-- `cargo check --workspace`;
-- `cargo clippy --workspace --all-targets -- -D warnings`;
-- `cargo test --workspace`;
-- fix the current prototype until the workspace is compiler-verified;
-- add CI for every pull request.
+- [x] install/use a Rust toolchain in CI;
+- [x] `cargo fmt --check`;
+- [x] `cargo check --workspace`;
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`;
+- [x] `cargo test --workspace`;
+- [x] fix the current prototype until the workspace is compiler-verified;
+- [x] add CI for every pull request.
+
+Still open from this phase, deliberately deferred to the phases that own them: broker
+cost/quota/rate ceilings (Phase 2) and a real isolation boundary (Phase 3).
 
 ## Phase 1 — Worker Runtime Baseline
 

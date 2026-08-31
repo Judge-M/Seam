@@ -13,3 +13,6 @@ serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

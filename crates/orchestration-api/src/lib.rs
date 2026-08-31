@@ -204,7 +204,10 @@ impl EventSink for InMemoryProjection {
                     ticket.summary = summary;
                 }
             }
-            ClientEvent::ArtifactCreated { ticket_id, artifact } => {
+            ClientEvent::ArtifactCreated {
+                ticket_id,
+                artifact,
+            } => {
                 if let Some(ticket) = projection.tickets.get_mut(&ticket_id) {
                     ticket.artifacts.push(artifact);
                 }
@@ -294,7 +297,10 @@ where
                 conversation_id,
                 ticket_id,
             } => {
-                let outcome = self.kernel.cancel_ticket(conversation_id, ticket_id).await?;
+                let outcome = self
+                    .kernel
+                    .cancel_ticket(conversation_id, ticket_id)
+                    .await?;
                 self.publish_outcome(conversation_id, outcome).await?;
             }
             ClientCommand::UpdateTicket {

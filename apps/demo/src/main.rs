@@ -2,7 +2,10 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use agent_protocol::{AuthorityEnvelope, LocalAuthority, Ticket};
 use async_trait::async_trait;
-use capability_broker::{BrokerError, CapabilityBroker, CapabilityDescriptor, CapabilityProvider, ProviderScore, SlmTranslator};
+use capability_broker::{
+    BrokerError, CapabilityBroker, CapabilityDescriptor, CapabilityProvider, ProviderScore,
+    SlmTranslator,
+};
 use model_gateway::LiteLlmClient;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -12,10 +15,18 @@ struct DemoSearchProvider;
 
 #[async_trait]
 impl CapabilityProvider for DemoSearchProvider {
-    fn id(&self) -> &str { "demo.search" }
-    fn capability(&self) -> &str { "web.search" }
+    fn id(&self) -> &str {
+        "demo.search"
+    }
+    fn capability(&self) -> &str {
+        "web.search"
+    }
     fn score(&self) -> ProviderScore {
-        ProviderScore { estimated_cost: 0.0, estimated_latency_ms: 5, health: 1.0 }
+        ProviderScore {
+            estimated_cost: 0.0,
+            estimated_latency_ms: 5,
+            health: 1.0,
+        }
     }
 
     async fn execute(&self, arguments: Value) -> Result<Value, BrokerError> {
@@ -54,8 +65,11 @@ async fn main() {
     broker.register_provider(Arc::new(DemoSearchProvider));
     let broker = Arc::new(broker);
 
+    // The demo inspects the working tree, so it needs reads and nothing else. Both the
+    // workbench ceiling and the ticket below are set accordingly: a demo should not hand a
+    // model write and execute authority over the directory it happens to be run from.
     let workspace = std::env::current_dir().expect("current directory");
-    let workbench = Arc::new(FsProcessWorkbench::new(workspace, true, true));
+    let workbench = Arc::new(FsProcessWorkbench::new(workspace, false, false));
     let worker = WorkerRuntime::new(worker_model, broker, workbench);
 
     let mut capabilities = BTreeSet::new();
@@ -71,8 +85,8 @@ async fn main() {
         authority: AuthorityEnvelope {
             local: LocalAuthority {
                 read_workspace: true,
-                write_workspace: true,
-                execute_local: true,
+                write_workspace: false,
+                execute_local: false,
             },
             external_capabilities: capabilities,
         },

@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use agent_protocol::{
-    AuthorityEnvelope, ContextItem, ConversationId, Ticket, TicketId, WorkerReport,
+    AuthorityEnvelope, ContextItem, ConversationId, LocalAuthority, Ticket, TicketId, WorkerReport,
 };
 use async_trait::async_trait;
 use model_gateway::{ModelGateway, ModelMessage, ModelRequest};
@@ -54,8 +54,62 @@ pub trait ConversationStore: Send + Sync {
 #[async_trait]
 pub trait WorkController: Send + Sync {
     async fn submit(&self, ticket: Ticket) -> Result<(), KernelError>;
-    async fn update(&self, ticket_id: TicketId, context: Vec<ContextItem>) -> Result<(), KernelError>;
+    async fn update(
+        &self,
+        ticket_id: TicketId,
+        context: Vec<ContextItem>,
+    ) -> Result<(), KernelError>;
     async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError>;
+}
+
+/// Deterministic ceiling on the authority a ticket may carry.
+///
+/// The orchestrator proposes a ticket, authority envelope included, but a model must not
+/// be the thing that decides what a worker is allowed to do. The kernel clamps every
+/// proposal to this policy, so the worst a confused or manipulated orchestrator can do is
+/// request authority it already had.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TicketAuthorityPolicy {
+    pub max_local: LocalAuthority,
+    #[serde(default)]
+    pub grantable_capabilities: BTreeSet<String>,
+}
+
+impl TicketAuthorityPolicy {
+    /// Local reads only, no external capabilities.
+    pub fn read_only() -> Self {
+        Self::default()
+    }
+
+    pub fn with_local(mut self, local: LocalAuthority) -> Self {
+        self.max_local = local;
+        self
+    }
+
+    pub fn with_capabilities<I, S>(mut self, capabilities: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.grantable_capabilities = capabilities.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Intersect a proposed envelope with the policy. Never widens.
+    pub fn clamp(&self, proposed: AuthorityEnvelope) -> AuthorityEnvelope {
+        AuthorityEnvelope {
+            local: LocalAuthority {
+                read_workspace: proposed.local.read_workspace && self.max_local.read_workspace,
+                write_workspace: proposed.local.write_workspace && self.max_local.write_workspace,
+                execute_local: proposed.local.execute_local && self.max_local.execute_local,
+            },
+            external_capabilities: proposed
+                .external_capabilities
+                .into_iter()
+                .filter(|capability| self.grantable_capabilities.contains(capability))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,10 +127,19 @@ pub struct NewTicket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OrchestratorAction {
-    Respond { text: String },
-    Submit { ticket: NewTicket },
-    Update { ticket_id: TicketId, context: Vec<ContextItem> },
-    Cancel { ticket_id: TicketId },
+    Respond {
+        text: String,
+    },
+    Submit {
+        ticket: NewTicket,
+    },
+    Update {
+        ticket_id: TicketId,
+        context: Vec<ContextItem>,
+    },
+    Cancel {
+        ticket_id: TicketId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,10 +153,19 @@ pub struct OrchestratorEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KernelTicketEvent {
-    Submitted { ticket: Ticket },
-    Updated { ticket_id: TicketId, context: Vec<ContextItem> },
-    Cancelled { ticket_id: TicketId },
-    WorkerReported { report: WorkerReport },
+    Submitted {
+        ticket: Ticket,
+    },
+    Updated {
+        ticket_id: TicketId,
+        context: Vec<ContextItem>,
+    },
+    Cancelled {
+        ticket_id: TicketId,
+    },
+    WorkerReported {
+        report: WorkerReport,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -109,6 +181,7 @@ pub struct OrchestrationKernel<M, Mem, Store, Work> {
     memory: Arc<Mem>,
     store: Arc<Store>,
     work: Arc<Work>,
+    authority_policy: TicketAuthorityPolicy,
 }
 
 impl<M, Mem, Store, Work> OrchestrationKernel<M, Mem, Store, Work>
@@ -118,8 +191,20 @@ where
     Store: ConversationStore + 'static,
     Work: WorkController + 'static,
 {
-    pub fn new(model: Arc<M>, memory: Arc<Mem>, store: Arc<Store>, work: Arc<Work>) -> Self {
-        Self { model, memory, store, work }
+    pub fn new(
+        model: Arc<M>,
+        memory: Arc<Mem>,
+        store: Arc<Store>,
+        work: Arc<Work>,
+        authority_policy: TicketAuthorityPolicy,
+    ) -> Self {
+        Self {
+            model,
+            memory,
+            store,
+            work,
+            authority_policy,
+        }
     }
 
     pub async fn handle_user_turn(
@@ -208,6 +293,10 @@ Your only control-plane actions are:
 
 Workers have NO durable memory. A worker knows only what you put in its ticket plus its task-local observations. Tickets must therefore be self-contained.
 
+A ticket's authority is a request, not a grant. The kernel clamps every ticket to a
+deterministic policy, so requesting more authority than the deployment permits simply
+removes it. Ask only for the authority the task needs.
+
 Return JSON:
 {
   "actions": [
@@ -233,14 +322,11 @@ Return JSON:
 
         let raw = self
             .model
-            .complete(ModelRequest {
-                messages,
-                temperature: 0.2,
-            })
+            .complete(ModelRequest::json(messages, 0.2))
             .await
             .map_err(|e| KernelError::Model(e.to_string()))?;
-        let envelope: OrchestratorEnvelope = serde_json::from_str(&raw)
-            .map_err(|e| KernelError::InvalidDecision(e.to_string()))?;
+        let envelope: OrchestratorEnvelope =
+            serde_json::from_str(&raw).map_err(|e| KernelError::InvalidDecision(e.to_string()))?;
 
         let mut outcome = KernelOutcome::default();
         for action in envelope.actions {
@@ -259,7 +345,8 @@ Return JSON:
                         context: ticket.context,
                         constraints: ticket.constraints,
                         deliverable: ticket.deliverable,
-                        authority: ticket.authority,
+                        // Clamped, not trusted: see `TicketAuthorityPolicy`.
+                        authority: self.authority_policy.clamp(ticket.authority),
                     };
                     self.work.submit(ticket.clone()).await?;
                     outcome
@@ -268,10 +355,9 @@ Return JSON:
                 }
                 OrchestratorAction::Update { ticket_id, context } => {
                     self.work.update(ticket_id, context.clone()).await?;
-                    outcome.ticket_events.push(KernelTicketEvent::Updated {
-                        ticket_id,
-                        context,
-                    });
+                    outcome
+                        .ticket_events
+                        .push(KernelTicketEvent::Updated { ticket_id, context });
                 }
                 OrchestratorAction::Cancel { ticket_id } => {
                     self.work.cancel(ticket_id).await?;
@@ -289,5 +375,190 @@ Return JSON:
         }
 
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct ScriptedModel(String);
+
+    #[async_trait]
+    impl ModelGateway for ScriptedModel {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<String, model_gateway::ModelError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NullMemory;
+
+    #[async_trait]
+    impl MemoryService for NullMemory {
+        async fn retrieve(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<MemoryItem>, KernelError> {
+            Ok(Vec::new())
+        }
+        async fn store(&self, _text: &str) -> Result<(), KernelError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct NullStore;
+
+    #[async_trait]
+    impl ConversationStore for NullStore {
+        async fn recent(
+            &self,
+            _conversation_id: ConversationId,
+            _limit: usize,
+        ) -> Result<Vec<ModelMessage>, KernelError> {
+            Ok(Vec::new())
+        }
+        async fn append(
+            &self,
+            _conversation_id: ConversationId,
+            _message: ModelMessage,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWork(Mutex<Vec<Ticket>>);
+
+    #[async_trait]
+    impl WorkController for RecordingWork {
+        async fn submit(&self, ticket: Ticket) -> Result<(), KernelError> {
+            self.0.lock().expect("lock").push(ticket);
+            Ok(())
+        }
+        async fn update(
+            &self,
+            _ticket_id: TicketId,
+            _context: Vec<ContextItem>,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+        async fn cancel(&self, _ticket_id: TicketId) -> Result<(), KernelError> {
+            Ok(())
+        }
+    }
+
+    /// An orchestrator asking for far more authority than the deployment allows.
+    fn greedy_submission() -> String {
+        json!({
+            "actions": [{
+                "type": "submit",
+                "ticket": {
+                    "objective": "investigate the failure",
+                    "deliverable": "a root cause",
+                    "authority": {
+                        "local": {
+                            "read_workspace": true,
+                            "write_workspace": true,
+                            "execute_local": true
+                        },
+                        "external_capabilities": [
+                            "web.search",
+                            "infrastructure.host.inspect",
+                            "communication.email.send"
+                        ]
+                    }
+                }
+            }]
+        })
+        .to_string()
+    }
+
+    async fn submit_under(policy: TicketAuthorityPolicy) -> Ticket {
+        let work = Arc::new(RecordingWork::default());
+        let kernel = OrchestrationKernel::new(
+            Arc::new(ScriptedModel(greedy_submission())),
+            Arc::new(NullMemory),
+            Arc::new(NullStore),
+            Arc::clone(&work),
+            policy,
+        );
+
+        kernel
+            .handle_user_turn(Uuid::new_v4(), "why is CI failing?")
+            .await
+            .expect("turn");
+
+        let tickets = work.0.lock().expect("lock");
+        tickets.first().cloned().expect("a ticket was submitted")
+    }
+
+    #[tokio::test]
+    async fn the_orchestrator_cannot_grant_itself_capabilities() {
+        let ticket =
+            submit_under(TicketAuthorityPolicy::read_only().with_capabilities(["web.search"]))
+                .await;
+
+        assert_eq!(
+            ticket.authority.external_capabilities,
+            ["web.search".to_string()]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "only policy-grantable capabilities survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_orchestrator_cannot_grant_itself_local_authority() {
+        let ticket = submit_under(TicketAuthorityPolicy::read_only()).await;
+
+        assert!(ticket.authority.local.read_workspace);
+        assert!(
+            !ticket.authority.local.write_workspace,
+            "writes were not grantable"
+        );
+        assert!(
+            !ticket.authority.local.execute_local,
+            "execution was not grantable"
+        );
+        assert!(ticket.authority.external_capabilities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_permissive_policy_still_only_grants_what_was_asked_for() {
+        let policy = TicketAuthorityPolicy::default()
+            .with_local(LocalAuthority {
+                read_workspace: true,
+                write_workspace: true,
+                execute_local: true,
+            })
+            .with_capabilities(["web.search", "infrastructure.host.inspect"]);
+
+        let ticket = submit_under(policy).await;
+        assert!(ticket.authority.local.execute_local);
+        assert_eq!(ticket.authority.external_capabilities.len(), 2);
+        assert!(
+            !ticket
+                .authority
+                .external_capabilities
+                .contains("communication.email.send"),
+            "a capability outside the policy is never granted"
+        );
+    }
+
+    #[test]
+    fn clamping_never_widens_authority() {
+        let policy = TicketAuthorityPolicy::default().with_capabilities(["web.search"]);
+        let clamped = policy.clamp(AuthorityEnvelope::default());
+        assert!(
+            clamped.external_capabilities.is_empty(),
+            "an unasked-for capability is not added"
+        );
     }
 }
