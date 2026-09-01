@@ -10,6 +10,7 @@ dependencies = [
  "async-trait",
  "capability-broker",
  "model-gateway",
+ "orchestration-api",
  "orchestration-kernel",
  "serde_json",
  "tokio",

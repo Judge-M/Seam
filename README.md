@@ -413,6 +413,51 @@ Production workers must run inside a real isolation boundary such as a container
 
 ---
 
+## Running the Demo
+
+The demo runs one user turn through the entire architecture and narrates every seam it
+crosses: client command, kernel, orchestrator model, ticket authority clamping, worker
+loop, local workbench, capability broker, worker report, and the resulting client events.
+
+```bash
+cargo run -p agent-architecture-demo
+```
+
+No credentials or network are required. In this default mode the three model calls
+(orchestrator, worker, broker SLM) are scripted; **every other component is the real
+one** - the real kernel, authority policy, broker, schema validation and worker loop are
+what execute.
+
+To run the same wiring against a real OpenAI-compatible endpoint such as
+[LiteLLM Proxy](https://github.com/BerriAI/litellm):
+
+```bash
+export SEAM_MODEL_BASE_URL=http://localhost:4000
+export SEAM_MODEL_API_KEY=...            # optional
+export SEAM_ORCHESTRATOR_MODEL=...       # default: orchestrator-model
+export SEAM_WORKER_MODEL=...             # default: worker-model
+export SEAM_BROKER_MODEL=...             # default: small-tool-model
+cargo run -p agent-architecture-demo
+```
+
+What the run demonstrates:
+
+- the orchestrator delegating rather than operating, and never seeing a tool;
+- a ticket whose requested authority is **narrowed** by deterministic policy before
+  dispatch;
+- the dispatcher assigning worker identity and registering the broker grant;
+- local workspace operations running directly, with bounded output;
+- an operation refused by ticket authority, observed by the worker rather than crashing it;
+- a plain-language request crossing the worker/broker seam, translated by the SLM into
+  one schema-validated capability call;
+- a bounded report flowing back, with the orchestrator never seeing raw worker exhaust;
+- what each compartment holds afterwards - and that the provider name appears only in
+  broker telemetry.
+
+The narration itself is worth noting: it is implemented as plain decorators over
+`LocalWorkbench` and `CapabilityTranslator` in the demo crate. Nothing in the runtime
+crates knows the demo exists.
+
 ## Design Principles
 
 Seam is built around a few strict defaults:

@@ -10,6 +10,7 @@ model-gateway = { path = "../../crates/model-gateway" }
 capability-broker = { path = "../../crates/capability-broker" }
 worker-runtime = { path = "../../crates/worker-runtime" }
 orchestration-kernel = { path = "../../crates/orchestration-kernel" }
+orchestration-api = { path = "../../crates/orchestration-api" }
 async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
