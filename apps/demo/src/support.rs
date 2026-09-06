@@ -104,14 +104,6 @@ impl DemoWorkController {
             .map(|mut pending| std::mem::take(&mut *pending))
             .unwrap_or_default()
     }
-
-    pub fn mark_running(&self, ticket_id: TicketId) {
-        self.inner.mark_running(ticket_id);
-    }
-
-    pub fn apply_report(&self, report: &agent_protocol::WorkerReport) {
-        self.inner.apply_report(report);
-    }
 }
 
 #[async_trait]
@@ -124,6 +116,14 @@ impl WorkController for DemoWorkController {
         self.inner.submit(ticket).await
     }
 
+    async fn assign(
+        &self,
+        ticket_id: TicketId,
+        worker_id: agent_protocol::WorkerId,
+    ) -> Result<(), KernelError> {
+        self.inner.assign(ticket_id, worker_id).await
+    }
+
     async fn update(
         &self,
         ticket_id: TicketId,
@@ -134,6 +134,13 @@ impl WorkController for DemoWorkController {
 
     async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError> {
         self.inner.cancel(ticket_id).await
+    }
+
+    async fn accept_report(
+        &self,
+        report: &agent_protocol::WorkerReport,
+    ) -> Result<(), KernelError> {
+        self.inner.accept_report(report).await
     }
 
     async fn active_work(
