@@ -387,9 +387,12 @@ The prototype currently includes:
 - typed, provider-opaque failure codes at the worker boundary;
 - a deterministic ticket-authority policy the orchestrator cannot widen;
 - broker-side authority resolution: workers present identity, not permissions;
+- a worker-facing `CapabilityClient` port that keeps in-process and network broker
+  transports interchangeable;
+- dispatcher-bound worker identity and atomic validation of terminal reports;
 - bounded worker context — windowed reads, capped output, capped observation budget;
 - task failure reported as a result rather than a runtime error;
-- ticket/conversation ownership enforced at the client seam;
+- ticket/conversation ownership enforced for client commands and model-issued control actions;
 - initial broker operational telemetry/state;
 - a transport-agnostic orchestration UI API;
 - an in-memory read projection for development/testing.

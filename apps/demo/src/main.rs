@@ -19,14 +19,13 @@ mod support;
 
 use std::sync::Arc;
 
-use agent_protocol::WorkerStatus;
 use async_trait::async_trait;
 use capability_broker::{
     BrokerError, CapabilityBroker, CapabilityDescriptor, CapabilityProvider,
     InMemoryTicketAuthorityStore, ProviderScore, SlmTranslator,
 };
 use orchestration_api::{ClientCommand, InMemoryProjection, OrchestrationApi, ReadModel};
-use orchestration_kernel::{OrchestrationKernel, TicketAuthorityPolicy};
+use orchestration_kernel::{OrchestrationKernel, TicketAuthorityPolicy, WorkController};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use worker_runtime::{FsProcessWorkbench, WorkerRuntime};
@@ -203,7 +202,11 @@ async fn main() {
         authority_store
             .grant(ticket.id, worker_id, ticket.authority.clone())
             .await;
-        work.mark_running(ticket.id);
+        if let Err(error) = work.assign(ticket.id, worker_id).await {
+            eprintln!("  dispatch failed: {error}");
+            authority_store.revoke(ticket.id).await;
+            continue;
+        }
         let _ = api.ticket_started(conversation_id, ticket.id).await;
 
         rule("3. Worker loop");
@@ -230,15 +233,6 @@ async fn main() {
             }
         }
         authority_store.revoke(ticket_id).await;
-        work.apply_report(&agent_protocol::WorkerReport {
-            worker_id,
-            ticket_id,
-            conversation_id,
-            status: WorkerStatus::Completed,
-            summary: String::new(),
-            artifacts: Vec::new(),
-            notes: Vec::new(),
-        });
     }
 
     // ---- 5. what each compartment ended up holding ----------------------------------

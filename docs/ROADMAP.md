@@ -25,6 +25,10 @@ Prerequisites for Phase 1 measurements being meaningful:
 - [x] broker authority resolved from a trusted source rather than supplied by the caller;
 - [x] active-work context for the orchestrator's own control plane;
 - [x] ticket/conversation ownership enforced at the API seam;
+- [x] model-issued ticket mutations use the same ownership checks as client commands;
+- [x] worker reports verified against ticket, conversation, assignment and lifecycle;
+- [x] worker runtime depends on a transport-neutral capability client port;
+- [x] deterministic capability candidate ordering for repeatable SLM inputs;
 - [x] provider identity removed from the worker-visible result.
 
 ## Phase 1 — Worker Runtime Baseline
@@ -185,7 +189,7 @@ Can capability/provider changes occur without changing worker behavior or prompt
 
 Do not add these until a measured requirement exists:
 
-- native Claude Code/Codex worker lanes;
+- native coding-agent worker lanes;
 - shared worker memory;
 - general worker-to-worker messaging;
 - model-specific broker adapters;

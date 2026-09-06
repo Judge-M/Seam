@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use agent_protocol::{
-    AuthorityEnvelope, CapabilityInvocation, CapabilityRequest, CapabilityResult, TicketId,
-    WorkerId,
+    AuthorityEnvelope, CapabilityClient, CapabilityFailure, CapabilityInvocation,
+    CapabilityRequest, CapabilityResult, TicketId, WorkerId,
 };
 use async_trait::async_trait;
 use model_gateway::{ModelGateway, ModelMessage, ModelRequest};
@@ -59,13 +59,19 @@ impl BrokerError {
     /// broker; the worker gets something actionable that leaks nothing about how the
     /// capability is implemented.
     pub fn code(&self) -> &'static str {
+        self.worker_failure().code()
+    }
+
+    /// Provider-opaque failure returned across the worker/broker seam.
+    pub fn worker_failure(&self) -> CapabilityFailure {
         match self {
-            Self::Denied(_) => "CAPABILITY_DENIED",
-            Self::CapabilityGap => "CAPABILITY_GAP",
-            Self::ProviderUnavailable(_) => "CAPABILITY_TEMPORARILY_UNAVAILABLE",
-            Self::Translation(_) => "CAPABILITY_REQUEST_NOT_UNDERSTOOD",
-            Self::InvalidArguments(_) => "CAPABILITY_ARGUMENTS_INVALID",
-            Self::Provider(_) => "CAPABILITY_TEMPORARILY_UNAVAILABLE",
+            Self::Denied(_) => CapabilityFailure::Denied,
+            Self::CapabilityGap => CapabilityFailure::Gap,
+            Self::ProviderUnavailable(_) | Self::Provider(_) => {
+                CapabilityFailure::TemporarilyUnavailable
+            }
+            Self::Translation(_) => CapabilityFailure::RequestNotUnderstood,
+            Self::InvalidArguments(_) => CapabilityFailure::InvalidArguments,
         }
     }
 }
@@ -277,11 +283,14 @@ where
 
     /// Deterministic shortlist before the SLM. This deliberately does not consult user/project memory.
     fn candidates(&self, authority: &AuthorityEnvelope) -> Vec<CapabilityDescriptor> {
-        self.capabilities
+        let mut candidates: Vec<_> = self
+            .capabilities
             .values()
             .filter(|descriptor| authority.external_capabilities.contains(&descriptor.name))
             .cloned()
-            .collect()
+            .collect();
+        candidates.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        candidates
     }
 
     /// Execute one capability request.
@@ -370,6 +379,26 @@ where
                 Err(error)
             }
         }
+    }
+}
+
+/// In-process adapter for the worker-facing capability port.
+///
+/// A future transport client implements the same trait; the worker runtime does not need
+/// to know whether this call is an async method on an `Arc` or a network hop.
+#[async_trait]
+impl<T, A> CapabilityClient for CapabilityBroker<T, A>
+where
+    T: CapabilityTranslator + 'static,
+    A: TicketAuthorityStore + 'static,
+{
+    async fn request(
+        &self,
+        request: &CapabilityRequest,
+    ) -> Result<CapabilityResult, CapabilityFailure> {
+        self.execute(request)
+            .await
+            .map_err(|error| error.worker_failure())
     }
 }
 
@@ -640,6 +669,31 @@ mod tests {
 
         assert_eq!(cheap.load(Ordering::SeqCst), 1);
         assert_eq!(expensive.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn capability_candidates_have_a_stable_order() {
+        let store = Arc::new(InMemoryTicketAuthorityStore::default());
+        let mut broker = CapabilityBroker::new(
+            Arc::new(FixedTranslator(search_invocation())),
+            Arc::clone(&store),
+        );
+        for name in ["web.zeta", "web.alpha", "web.middle"] {
+            broker.register_capability(CapabilityDescriptor {
+                name: name.into(),
+                description: name.into(),
+                argument_schema: json!({"type": "object"}),
+            });
+        }
+
+        let authority = envelope(&["web.zeta", "web.alpha", "web.middle"]);
+        let names: Vec<_> = broker
+            .candidates(&authority)
+            .into_iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+
+        assert_eq!(names, ["web.alpha", "web.middle", "web.zeta"]);
     }
 
     #[tokio::test]

@@ -129,11 +129,29 @@ the authority the deployment already configured.
 
 A ticket id is not a capability. `cancel_ticket` and `update_ticket` verify that the
 ticket belongs to the conversation the command arrived on, and refuse unknown tickets
-rather than passing them through. This is enforced at the seam so that no present or
-future frontend has to remember to do it.
+rather than passing them through. Model-issued update and cancellation actions pass
+through the same ownership check; model output is not a trusted shortcut around the
+client seam. This is enforced centrally so that no present or future frontend or model
+action path has to remember to do it.
 
 There is no user authentication yet, so this is a semantic contract rather than a
 complete authorization story; it is the layer a real identity model would sit on top of.
+
+## Worker Report Integrity
+
+A worker report is untrusted ingress until the work controller validates it. Dispatch
+atomically binds a queued ticket to one worker identity and marks it running. A terminal
+report is accepted only when:
+
+- the ticket exists;
+- the report names the ticket's owning conversation;
+- the report comes from the assigned worker;
+- the ticket is currently running.
+
+Acceptance atomically moves the ticket to its terminal state. Reports for unknown,
+unassigned, cancelled or already-terminal tickets are denied, including replays.
+The prototype establishes this semantic binding in memory; a network transport must
+also authenticate the caller so `worker_id` is not merely self-asserted.
 
 ## Credentials
 
