@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn worker_facing_codes_do_not_leak_provider_detail() {
-        let error = BrokerError::Provider("github-mcp socket error: 503 at 10.0.0.4".into());
+        let error = BrokerError::Provider("provider socket error: 503 at 10.0.0.4".into());
         assert_eq!(error.code(), "CAPABILITY_TEMPORARILY_UNAVAILABLE");
         assert!(!error.code().contains("10.0.0.4"));
     }

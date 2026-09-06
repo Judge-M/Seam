@@ -10,6 +10,7 @@ dependencies = [
  "async-trait",
  "capability-broker",
  "model-gateway",
+ "model-gateway-chat-completions",
  "orchestration-api",
  "orchestration-kernel",
  "serde_json",
@@ -506,10 +507,19 @@ name = "model-gateway"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "model-gateway-chat-completions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "model-gateway",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]
