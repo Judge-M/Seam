@@ -54,7 +54,8 @@ If a task requires coding or domain reasoning, that work belongs to the worker m
 
 ## 8. Deterministic Before Probabilistic
 
-If policy, routing, authorization, validation or provider selection can be expressed reliably in normal code, use normal code.
+If capability policy, capability routing, authorization, validation or capability-provider
+selection can be expressed reliably in normal code, use normal code.
 
 Use the SLM only where semantic interpretation is actually required.
 
@@ -99,9 +100,13 @@ Shared ports must not expose a vendor SDK type, transport-client error, deployme
 or adapter-specific wire field. Concrete adapters translate at the edge and are selected by
 the composition root. Products named in examples or evaluations are candidates, not defaults.
 
+Seam does not select models. Model identifiers, routing, fallback and provider policy belong
+behind `ModelGateway`; Seam components provide semantic inference requests only.
+
 ## 14. UI Is a Client
 
-The UI renders conversations, work, approvals, artifacts and events. It does not decide how work is decomposed, what model runs it, or which provider executes a capability.
+The UI renders conversations, work, approvals, artifacts and events. It does not decide how
+work is decomposed, how inference is routed, or which provider executes a capability.
 
 Presentation must remain replaceable.
 

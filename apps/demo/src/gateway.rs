@@ -1,7 +1,7 @@
 //! Model wiring for the demo.
 //!
-//! The demo runs in one of two modes. With `SEAM_MODEL_BASE_URL` set it uses the included
-//! chat-completions HTTP adapter. Without it, a scripted gateway replays a fixed
+//! The demo runs in one of two modes. With `SEAM_MODEL_GATEWAY_URL` set it uses the
+//! included chat-completions HTTP adapter. Without it, a scripted gateway replays a fixed
 //! conversation so the whole architecture can be run end to end with no credentials and
 //! no network. This adapter is a demo composition choice, not a core dependency.
 //!
@@ -29,22 +29,6 @@ impl Role {
             Role::Orchestrator => "orchestrator (frontier)",
             Role::Worker => "worker",
             Role::BrokerSlm => "broker SLM",
-        }
-    }
-
-    fn env_var(self) -> &'static str {
-        match self {
-            Role::Orchestrator => "SEAM_ORCHESTRATOR_MODEL",
-            Role::Worker => "SEAM_WORKER_MODEL",
-            Role::BrokerSlm => "SEAM_BROKER_MODEL",
-        }
-    }
-
-    fn default_model(self) -> &'static str {
-        match self {
-            Role::Orchestrator => "orchestrator-model",
-            Role::Worker => "worker-model",
-            Role::BrokerSlm => "small-tool-model",
         }
     }
 }
@@ -105,15 +89,11 @@ pub struct LiveConfig {
 
 impl LiveConfig {
     pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var("SEAM_MODEL_BASE_URL").ok()?;
+        let base_url = std::env::var("SEAM_MODEL_GATEWAY_URL").ok()?;
         Some(Self {
             base_url,
-            api_key: std::env::var("SEAM_MODEL_API_KEY").ok(),
+            api_key: std::env::var("SEAM_MODEL_GATEWAY_API_KEY").ok(),
         })
-    }
-
-    pub fn model_for(&self, role: Role) -> String {
-        std::env::var(role.env_var()).unwrap_or_else(|_| role.default_model().to_string())
     }
 }
 
@@ -123,7 +103,6 @@ pub fn gateway_for(role: Role, live: Option<&LiveConfig>, script: Vec<String>) -
         Some(config) => DemoGateway::Live(ChatCompletionsClient::new(
             config.base_url.clone(),
             config.api_key.clone(),
-            config.model_for(role),
         )),
         None => DemoGateway::Scripted(ScriptedGateway::new(role, script)),
     }

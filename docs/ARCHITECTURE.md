@@ -89,7 +89,7 @@ Responsibilities:
 - persist/reconstruct conversation state;
 - retrieve permitted durable memory;
 - assemble orchestrator context;
-- invoke the selected frontier model through a model gateway;
+- submit inference through a model gateway;
 - interpret orchestration-control outputs;
 - create/update/cancel work tickets;
 - receive worker completion/failure events;
@@ -141,6 +141,10 @@ The contract expresses Seam-level intent such as conversational roles and the re
 output shape. Provider SDK types, HTTP-client errors, endpoint paths and wire-protocol fields
 belong inside adapters. The included chat-completions HTTP adapter is used by the demo only
 and does not define the architecture or constrain other adapters.
+
+Seam never selects or names a model. `ModelRequest` carries no model identifier, and tickets
+cannot request one. Selection, routing, fallback and provider policy are the gateway's
+responsibility; Seam supplies only the semantic inference request.
 
 ## 5. Tickets
 

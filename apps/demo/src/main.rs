@@ -10,9 +10,10 @@
 //!   -> kernel -> orchestrator model -> client events
 //! ```
 //!
-//! By default no credentials or network are needed: the three models are scripted. Set
-//! `SEAM_MODEL_BASE_URL` (plus optional `SEAM_MODEL_API_KEY`) to run the identical wiring
-//! through the demo's chat-completions HTTP adapter.
+//! By default no credentials or network are needed: the three model calls are scripted.
+//! Set `SEAM_MODEL_GATEWAY_URL` (plus optional `SEAM_MODEL_GATEWAY_API_KEY`) to run the
+//! identical wiring through the demo's chat-completions HTTP adapter. The gateway owns
+//! model selection.
 
 mod gateway;
 mod support;
@@ -84,14 +85,14 @@ async fn main() {
     rule("Seam end-to-end demo");
     match &live {
         Some(config) => println!(
-            "Model mode: LIVE against {} \n\
-             Orchestrator/worker/broker models come from SEAM_*_MODEL.",
+            "Model mode: LIVE against {}\n\
+             The gateway owns model selection and routing.",
             config.base_url
         ),
         None => println!(
             "Model mode: SCRIPTED (no credentials or network needed).\n\
              Every component below is the real one; only the three model calls are canned.\n\
-             Set SEAM_MODEL_BASE_URL to run this same wiring against a live endpoint."
+             Set SEAM_MODEL_GATEWAY_URL to use a live gateway."
         ),
     }
 
@@ -167,7 +168,7 @@ async fn main() {
     {
         eprintln!("\n  command failed: {error}");
         if live.is_some() {
-            eprintln!("  (check SEAM_MODEL_BASE_URL is reachable and the model names exist)");
+            eprintln!("  (check SEAM_MODEL_GATEWAY_URL is reachable and correctly configured)");
         }
         return;
     }

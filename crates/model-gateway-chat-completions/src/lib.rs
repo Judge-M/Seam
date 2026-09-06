@@ -8,31 +8,27 @@ use serde_json::{Map, Value, json};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Adapter for HTTP servers that implement the chat-completions JSON protocol.
+/// Adapter for gateways that accept the chat-completions JSON request shape while owning
+/// model selection and routing themselves.
 ///
 /// This is one replaceable implementation of [`ModelGateway`], not Seam's model
-/// architecture. Other serving protocols belong in sibling adapter crates.
+/// architecture. It deliberately sends no model identifier. Other serving protocols
+/// belong in sibling adapter crates.
 #[derive(Clone)]
 pub struct ChatCompletionsClient {
     http: Client,
     base_url: String,
     api_key: Option<String>,
-    model: String,
 }
 
 impl ChatCompletionsClient {
-    pub fn new(
-        base_url: impl Into<String>,
-        api_key: Option<String>,
-        model: impl Into<String>,
-    ) -> Self {
-        Self::with_timeout(base_url, api_key, model, DEFAULT_TIMEOUT)
+    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        Self::with_timeout(base_url, api_key, DEFAULT_TIMEOUT)
     }
 
     pub fn with_timeout(
         base_url: impl Into<String>,
         api_key: Option<String>,
-        model: impl Into<String>,
         timeout: Duration,
     ) -> Self {
         let http = Client::builder()
@@ -44,13 +40,11 @@ impl ChatCompletionsClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
-            model: model.into(),
         }
     }
 
     fn payload(&self, request: &ModelRequest) -> Value {
         let mut payload = Map::new();
-        payload.insert("model".into(), json!(self.model));
         payload.insert("messages".into(), json!(request.messages));
         payload.insert("temperature".into(), json!(request.temperature));
         if request.output == ModelOutput::JsonObject {
@@ -116,14 +110,14 @@ mod tests {
     use model_gateway::ModelMessage;
 
     #[test]
-    fn adapter_maps_neutral_output_contract_to_its_wire_shape() {
-        let client = ChatCompletionsClient::new("http://localhost:1234", None, "worker");
+    fn adapter_maps_output_contract_without_selecting_a_model() {
+        let client = ChatCompletionsClient::new("http://localhost:1234", None);
         let request =
             ModelRequest::json(vec![ModelMessage::user("work")], 0.1).with_max_output_tokens(512);
 
         let payload = client.payload(&request);
 
-        assert_eq!(payload["model"], "worker");
+        assert!(payload.get("model").is_none());
         assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(payload["response_format"]["type"], "json_object");
         assert_eq!(payload["max_tokens"], 512);
@@ -131,7 +125,7 @@ mod tests {
 
     #[test]
     fn text_requests_do_not_gain_adapter_specific_json_constraints() {
-        let client = ChatCompletionsClient::new("http://localhost:1234", None, "worker");
+        let client = ChatCompletionsClient::new("http://localhost:1234", None);
         let payload = client.payload(&ModelRequest::text(vec![ModelMessage::user("work")], 0.1));
 
         assert!(payload.get("response_format").is_none());

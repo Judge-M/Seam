@@ -55,6 +55,8 @@ pub enum ModelOutput {
 
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
+    /// Semantic conversation input only. There is intentionally no model identifier:
+    /// selection and routing belong to the gateway implementation.
     pub messages: Vec<ModelMessage>,
     pub temperature: f32,
     pub output: ModelOutput,

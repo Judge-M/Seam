@@ -437,19 +437,17 @@ what execute.
 To run the same wiring through the demo's included chat-completions HTTP adapter:
 
 ```bash
-export SEAM_MODEL_BASE_URL=http://localhost:4000
-export SEAM_MODEL_API_KEY=...            # optional
-export SEAM_ORCHESTRATOR_MODEL=...       # default: orchestrator-model
-export SEAM_WORKER_MODEL=...             # default: worker-model
-export SEAM_BROKER_MODEL=...             # default: small-tool-model
+export SEAM_MODEL_GATEWAY_URL=http://localhost:4000
+export SEAM_MODEL_GATEWAY_API_KEY=...     # optional
 cargo run -p agent-architecture-demo
 ```
 
-The endpoint may be a compatible model server, proxy, or gateway. Model identifiers are
-opaque adapter configuration: Seam's kernel, workers, tickets, and broker never interpret
-them. Other serving protocols can implement `ModelGateway` in sibling adapter crates; the
-demo adapter is an example, not a required deployment component. LiteLLM is one possible
-endpoint for this adapter, not a Seam dependency or preferred deployment path.
+The endpoint is a gateway or proxy configured to own model routing. Seam sends no model
+identifier: selection, routing, fallback and provider policy belong entirely behind that
+boundary. Seam's kernel, workers, tickets and broker neither choose nor name models. Other
+serving protocols can implement `ModelGateway` in sibling adapter crates; the demo adapter
+is an example, not a required deployment component. LiteLLM can participate in such a
+deployment, but it is not a Seam dependency or preferred path.
 
 What the run demonstrates:
 
