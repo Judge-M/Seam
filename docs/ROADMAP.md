@@ -189,7 +189,7 @@ Can capability/provider changes occur without changing worker behavior or prompt
 
 Do not add these until a measured requirement exists:
 
-- native Claude Code/Codex worker lanes;
+- native coding-agent worker lanes;
 - shared worker memory;
 - general worker-to-worker messaging;
 - model-specific broker adapters;
