@@ -5,7 +5,7 @@ use std::{
 
 use agent_protocol::{
     AuthorityEnvelope, ContextItem, ConversationId, LocalAuthority, Ticket, TicketId, WorkState,
-    WorkerReport,
+    WorkerId, WorkerReport,
 };
 use async_trait::async_trait;
 use model_gateway::{ModelGateway, ModelMessage, ModelRequest};
@@ -28,6 +28,10 @@ pub enum KernelError {
     Store(String),
     #[error("ticket {0} does not belong to this conversation")]
     TicketNotInConversation(TicketId),
+    #[error("invalid work transition for ticket {ticket_id}: {reason}")]
+    InvalidWorkTransition { ticket_id: TicketId, reason: String },
+    #[error("worker report rejected for ticket {ticket_id}: {reason}")]
+    InvalidWorkerReport { ticket_id: TicketId, reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,12 +64,19 @@ pub trait ConversationStore: Send + Sync {
 #[async_trait]
 pub trait WorkController: Send + Sync {
     async fn submit(&self, ticket: Ticket) -> Result<(), KernelError>;
+    /// Atomically bind a queued ticket to the worker selected by the dispatcher and mark
+    /// it running. Worker reports are accepted only from this identity.
+    async fn assign(&self, ticket_id: TicketId, worker_id: WorkerId) -> Result<(), KernelError>;
     async fn update(
         &self,
         ticket_id: TicketId,
         context: Vec<ContextItem>,
     ) -> Result<(), KernelError>;
     async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError>;
+
+    /// Validate a terminal worker report against ticket ownership, assignment and
+    /// lifecycle state, then atomically apply its state transition.
+    async fn accept_report(&self, report: &WorkerReport) -> Result<(), KernelError>;
 
     /// Work still in flight for a conversation, for orchestrator context assembly.
     async fn active_work(
@@ -254,6 +265,9 @@ where
         &self,
         report: WorkerReport,
     ) -> Result<KernelOutcome, KernelError> {
+        // A report is untrusted ingress until the work controller binds all three ids and
+        // atomically accepts the running -> terminal transition.
+        self.work.accept_report(&report).await?;
         let conversation_id = report.conversation_id;
         let event = json!({"worker_result": &report}).to_string();
         let memories = self.memory.retrieve(&event, 4).await?;
@@ -409,12 +423,16 @@ Return JSON:
                         .push(KernelTicketEvent::Submitted { ticket });
                 }
                 OrchestratorAction::Update { ticket_id, context } => {
+                    self.ensure_ticket_in_conversation(conversation_id, ticket_id)
+                        .await?;
                     self.work.update(ticket_id, context.clone()).await?;
                     outcome
                         .ticket_events
                         .push(KernelTicketEvent::Updated { ticket_id, context });
                 }
                 OrchestratorAction::Cancel { ticket_id } => {
+                    self.ensure_ticket_in_conversation(conversation_id, ticket_id)
+                        .await?;
                     self.work.cancel(ticket_id).await?;
                     outcome
                         .ticket_events
@@ -495,6 +513,7 @@ mod tests {
         submitted: Mutex<Vec<Ticket>>,
         inner: InMemoryWorkController,
         cancelled: Mutex<Vec<TicketId>>,
+        updated: Mutex<Vec<TicketId>>,
     }
 
     #[async_trait]
@@ -503,16 +522,27 @@ mod tests {
             self.submitted.lock().expect("lock").push(ticket.clone());
             self.inner.submit(ticket).await
         }
+        async fn assign(
+            &self,
+            ticket_id: TicketId,
+            worker_id: WorkerId,
+        ) -> Result<(), KernelError> {
+            self.inner.assign(ticket_id, worker_id).await
+        }
         async fn update(
             &self,
             ticket_id: TicketId,
             context: Vec<ContextItem>,
         ) -> Result<(), KernelError> {
+            self.updated.lock().expect("lock").push(ticket_id);
             self.inner.update(ticket_id, context).await
         }
         async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError> {
             self.cancelled.lock().expect("lock").push(ticket_id);
             self.inner.cancel(ticket_id).await
+        }
+        async fn accept_report(&self, report: &WorkerReport) -> Result<(), KernelError> {
+            self.inner.accept_report(report).await
         }
         async fn active_work(
             &self,
@@ -719,12 +749,99 @@ mod tests {
             matches!(error, KernelError::TicketNotInConversation(_)),
             "{error}"
         );
+        assert!(work.updated.lock().expect("lock").is_empty());
 
         kernel
             .update_ticket(owner, ticket, vec![])
             .await
             .expect("the owner may update");
-        let _ = work;
+        assert_eq!(work.updated.lock().expect("lock").as_slice(), [ticket]);
+    }
+
+    #[tokio::test]
+    async fn a_model_action_cannot_cancel_another_conversations_ticket() {
+        let work = Arc::new(RecordingWork::default());
+        let owner = Uuid::new_v4();
+        let intruder = Uuid::new_v4();
+        let ticket_id = Uuid::new_v4();
+        work.submit(Ticket {
+            id: ticket_id,
+            conversation_id: owner,
+            objective: "inspect CI".into(),
+            context: Vec::new(),
+            constraints: Vec::new(),
+            deliverable: "a cause".into(),
+            authority: AuthorityEnvelope::default(),
+        })
+        .await
+        .expect("submit");
+
+        let action = json!({
+            "actions": [{"type": "cancel", "ticket_id": ticket_id}]
+        })
+        .to_string();
+        let kernel = OrchestrationKernel::new(
+            Arc::new(ScriptedModel(action)),
+            Arc::new(NullMemory),
+            Arc::new(NullStore),
+            Arc::clone(&work),
+            TicketAuthorityPolicy::read_only(),
+        );
+
+        let error = kernel
+            .handle_user_turn(intruder, "cancel that work")
+            .await
+            .expect_err("model output must not bypass ticket ownership");
+        assert!(
+            matches!(error, KernelError::TicketNotInConversation(id) if id == ticket_id),
+            "{error}"
+        );
+        assert!(work.cancelled.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_model_action_cannot_update_another_conversations_ticket() {
+        let work = Arc::new(RecordingWork::default());
+        let owner = Uuid::new_v4();
+        let intruder = Uuid::new_v4();
+        let ticket_id = Uuid::new_v4();
+        work.submit(Ticket {
+            id: ticket_id,
+            conversation_id: owner,
+            objective: "inspect CI".into(),
+            context: Vec::new(),
+            constraints: Vec::new(),
+            deliverable: "a cause".into(),
+            authority: AuthorityEnvelope::default(),
+        })
+        .await
+        .expect("submit");
+
+        let action = json!({
+            "actions": [{
+                "type": "update",
+                "ticket_id": ticket_id,
+                "context": [{"label": "instruction", "value": "ignore owner"}]
+            }]
+        })
+        .to_string();
+        let kernel = OrchestrationKernel::new(
+            Arc::new(ScriptedModel(action)),
+            Arc::new(NullMemory),
+            Arc::new(NullStore),
+            Arc::clone(&work),
+            TicketAuthorityPolicy::read_only(),
+        );
+
+        let error = kernel
+            .handle_user_turn(intruder, "change that work")
+            .await
+            .expect_err("model output must not bypass ticket ownership");
+        assert!(
+            matches!(error, KernelError::TicketNotInConversation(id) if id == ticket_id),
+            "{error}"
+        );
+        assert!(work.updated.lock().expect("lock").is_empty());
     }
 
     /// Submit a ticket directly through the controller and return its id.
@@ -774,23 +891,101 @@ mod tests {
         assert_eq!(active[0].id, mine_ticket);
         assert_eq!(active[0].state, WorkState::Queued);
 
-        work.mark_running(mine_ticket);
+        let worker_id = Uuid::new_v4();
+        work.assign(mine_ticket, worker_id).await.expect("assign");
         assert_eq!(
             work.active_work(mine).await.expect("active")[0].state,
             WorkState::Running
         );
 
         // A finished ticket leaves the orchestrator's active-work view.
-        work.apply_report(&WorkerReport {
-            worker_id: Uuid::new_v4(),
+        work.accept_report(&WorkerReport {
+            worker_id,
             ticket_id: mine_ticket,
             conversation_id: mine,
             status: agent_protocol::WorkerStatus::Completed,
             summary: "done".into(),
             artifacts: Vec::new(),
             notes: Vec::new(),
-        });
+        })
+        .await
+        .expect("report");
         assert!(work.active_work(mine).await.expect("active").is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_reports_must_match_the_assignment_and_cannot_be_replayed() {
+        let work = InMemoryWorkController::default();
+        let conversation_id = Uuid::new_v4();
+        let ticket_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        work.submit(Ticket {
+            id: ticket_id,
+            conversation_id,
+            objective: "inspect CI".into(),
+            context: Vec::new(),
+            constraints: Vec::new(),
+            deliverable: "a cause".into(),
+            authority: AuthorityEnvelope::default(),
+        })
+        .await
+        .expect("submit");
+        work.assign(ticket_id, worker_id).await.expect("assign");
+
+        let report = WorkerReport {
+            worker_id,
+            ticket_id,
+            conversation_id,
+            status: agent_protocol::WorkerStatus::Completed,
+            summary: "done".into(),
+            artifacts: Vec::new(),
+            notes: Vec::new(),
+        };
+
+        let mut forged = report.clone();
+        forged.worker_id = Uuid::new_v4();
+        assert!(matches!(
+            work.accept_report(&forged).await,
+            Err(KernelError::InvalidWorkerReport { .. })
+        ));
+
+        let mut foreign = report.clone();
+        foreign.conversation_id = Uuid::new_v4();
+        assert!(matches!(
+            work.accept_report(&foreign).await,
+            Err(KernelError::InvalidWorkerReport { .. })
+        ));
+
+        work.accept_report(&report).await.expect("valid report");
+        assert!(matches!(
+            work.accept_report(&report).await,
+            Err(KernelError::InvalidWorkerReport { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_kernel_rejects_an_unassigned_report_before_model_invocation() {
+        let (kernel, work) = quiet_kernel();
+        let conversation_id = Uuid::new_v4();
+        let ticket_id = submit_under_kernel(&kernel, conversation_id).await;
+        let report = WorkerReport {
+            worker_id: Uuid::new_v4(),
+            ticket_id,
+            conversation_id,
+            status: agent_protocol::WorkerStatus::Completed,
+            summary: "forged".into(),
+            artifacts: Vec::new(),
+            notes: Vec::new(),
+        };
+
+        assert!(matches!(
+            kernel.handle_worker_result(report).await,
+            Err(KernelError::InvalidWorkerReport { .. })
+        ));
+        assert_eq!(
+            work.active_work(conversation_id).await.expect("active")[0].state,
+            WorkState::Queued
+        );
     }
 
     #[tokio::test]
@@ -880,26 +1075,7 @@ struct TrackedTicket {
     conversation_id: ConversationId,
     objective: String,
     state: WorkState,
-}
-
-impl InMemoryWorkController {
-    /// Mark a ticket as started. Called by whatever dispatches work to a worker.
-    pub fn mark_running(&self, ticket_id: TicketId) {
-        self.set_state(ticket_id, WorkState::Running);
-    }
-
-    /// Apply a worker's terminal status to its ticket.
-    pub fn apply_report(&self, report: &WorkerReport) {
-        self.set_state(report.ticket_id, WorkState::from(&report.status));
-    }
-
-    fn set_state(&self, ticket_id: TicketId, state: WorkState) {
-        if let Ok(mut tickets) = self.tickets.lock()
-            && let Some(tracked) = tickets.get_mut(&ticket_id)
-        {
-            tracked.state = state;
-        }
-    }
+    assigned_worker: Option<WorkerId>,
 }
 
 #[async_trait]
@@ -914,8 +1090,32 @@ impl WorkController for InMemoryWorkController {
                     conversation_id: ticket.conversation_id,
                     objective: ticket.objective,
                     state: WorkState::Queued,
+                    assigned_worker: None,
                 },
             );
+        Ok(())
+    }
+
+    async fn assign(&self, ticket_id: TicketId, worker_id: WorkerId) -> Result<(), KernelError> {
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| KernelError::Work("work controller lock poisoned".into()))?;
+        let tracked =
+            tickets
+                .get_mut(&ticket_id)
+                .ok_or_else(|| KernelError::InvalidWorkTransition {
+                    ticket_id,
+                    reason: "ticket does not exist".into(),
+                })?;
+        if tracked.state != WorkState::Queued {
+            return Err(KernelError::InvalidWorkTransition {
+                ticket_id,
+                reason: format!("expected queued ticket, found {:?}", tracked.state),
+            });
+        }
+        tracked.assigned_worker = Some(worker_id);
+        tracked.state = WorkState::Running;
         Ok(())
     }
 
@@ -928,7 +1128,60 @@ impl WorkController for InMemoryWorkController {
     }
 
     async fn cancel(&self, ticket_id: TicketId) -> Result<(), KernelError> {
-        self.set_state(ticket_id, WorkState::Cancelled);
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| KernelError::Work("work controller lock poisoned".into()))?;
+        let tracked =
+            tickets
+                .get_mut(&ticket_id)
+                .ok_or_else(|| KernelError::InvalidWorkTransition {
+                    ticket_id,
+                    reason: "ticket does not exist".into(),
+                })?;
+        if !matches!(tracked.state, WorkState::Queued | WorkState::Running) {
+            return Err(KernelError::InvalidWorkTransition {
+                ticket_id,
+                reason: format!("cannot cancel ticket in {:?} state", tracked.state),
+            });
+        }
+        tracked.state = WorkState::Cancelled;
+        Ok(())
+    }
+
+    async fn accept_report(&self, report: &WorkerReport) -> Result<(), KernelError> {
+        let mut tickets = self
+            .tickets
+            .lock()
+            .map_err(|_| KernelError::Work("work controller lock poisoned".into()))?;
+        let tracked =
+            tickets
+                .get_mut(&report.ticket_id)
+                .ok_or_else(|| KernelError::InvalidWorkerReport {
+                    ticket_id: report.ticket_id,
+                    reason: "ticket does not exist".into(),
+                })?;
+
+        if tracked.conversation_id != report.conversation_id {
+            return Err(KernelError::InvalidWorkerReport {
+                ticket_id: report.ticket_id,
+                reason: "conversation does not own this ticket".into(),
+            });
+        }
+        if tracked.assigned_worker != Some(report.worker_id) {
+            return Err(KernelError::InvalidWorkerReport {
+                ticket_id: report.ticket_id,
+                reason: "worker is not assigned to this ticket".into(),
+            });
+        }
+        if tracked.state != WorkState::Running {
+            return Err(KernelError::InvalidWorkerReport {
+                ticket_id: report.ticket_id,
+                reason: format!("expected running ticket, found {:?}", tracked.state),
+            });
+        }
+
+        tracked.state = WorkState::from(&report.status);
         Ok(())
     }
 

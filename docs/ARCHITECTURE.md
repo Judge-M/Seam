@@ -165,7 +165,10 @@ return bounded final result
 ```
 
 Worker identity is assigned by the dispatcher, not chosen by the worker, because the
-broker binds authority to it.
+broker binds authority to it. Assignment also belongs to the work controller: it
+atomically binds `(ticket, worker)` and moves the ticket from queued to running. A
+terminal report is accepted only when its ticket, conversation, assigned worker and
+current lifecycle state all match.
 
 A failed *task* is a report with status `failed`. A runtime error is a separate outcome:
 the two must not be conflated, or the orchestrator cannot tell "the work could not be
@@ -193,6 +196,10 @@ These actions should not require an SLM round trip through the Capability Broker
 ### 6.2 External boundary
 
 Anything that crosses the sandbox boundary must be brokered.
+
+The runtime depends on the `CapabilityClient` port, not the broker's concrete type. The
+prototype implements that port in-process; a distributed client can implement the same
+contract without changing the worker loop.
 
 Examples:
 

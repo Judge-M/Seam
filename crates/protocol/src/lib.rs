@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 use uuid::Uuid;
 
 pub type ConversationId = Uuid;
@@ -78,6 +80,56 @@ pub struct CapabilityResult {
     pub data: Value,
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// Stable failure surface exposed across the worker/broker seam.
+///
+/// Provider identities, transport failures and credential-bearing details remain inside
+/// the broker. An in-process broker and a future RPC client expose the same bounded
+/// contract to the worker runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CapabilityFailure {
+    #[error("capability denied")]
+    #[serde(rename = "CAPABILITY_DENIED")]
+    Denied,
+    #[error("no capability matches the request")]
+    #[serde(rename = "CAPABILITY_GAP")]
+    Gap,
+    #[error("capability temporarily unavailable")]
+    #[serde(rename = "CAPABILITY_TEMPORARILY_UNAVAILABLE")]
+    TemporarilyUnavailable,
+    #[error("capability request not understood")]
+    #[serde(rename = "CAPABILITY_REQUEST_NOT_UNDERSTOOD")]
+    RequestNotUnderstood,
+    #[error("capability arguments invalid")]
+    #[serde(rename = "CAPABILITY_ARGUMENTS_INVALID")]
+    InvalidArguments,
+}
+
+impl CapabilityFailure {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Denied => "CAPABILITY_DENIED",
+            Self::Gap => "CAPABILITY_GAP",
+            Self::TemporarilyUnavailable => "CAPABILITY_TEMPORARILY_UNAVAILABLE",
+            Self::RequestNotUnderstood => "CAPABILITY_REQUEST_NOT_UNDERSTOOD",
+            Self::InvalidArguments => "CAPABILITY_ARGUMENTS_INVALID",
+        }
+    }
+}
+
+/// Port used by workers to request external capabilities.
+///
+/// The worker runtime depends on this contract rather than the broker's concrete type.
+/// Implementations may call an in-process broker, cross an RPC boundary, or record calls
+/// for tests without changing the worker loop.
+#[async_trait]
+pub trait CapabilityClient: Send + Sync {
+    async fn request(
+        &self,
+        request: &CapabilityRequest,
+    ) -> Result<CapabilityResult, CapabilityFailure>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

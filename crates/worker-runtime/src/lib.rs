@@ -7,12 +7,10 @@ use std::{
 };
 
 use agent_protocol::{
-    CapabilityRequest, LocalAuthority, Ticket, WorkerId, WorkerReport, WorkerStatus,
+    CapabilityClient, CapabilityRequest, LocalAuthority, Ticket, WorkerId, WorkerReport,
+    WorkerStatus,
 };
 use async_trait::async_trait;
-use capability_broker::{
-    BrokerError, CapabilityBroker, CapabilityTranslator, TicketAuthorityStore,
-};
 use model_gateway::{ModelGateway, ModelMessage, ModelRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -90,8 +88,6 @@ pub enum WorkerError {
     Local(String),
     #[error("local authority denied: {0}")]
     Denied(String),
-    #[error("capability broker error: {0}")]
-    Broker(#[from] BrokerError),
     #[error("worker exceeded step limit")]
     StepLimit,
 }
@@ -394,26 +390,25 @@ impl LocalWorkbench for FsProcessWorkbench {
     }
 }
 
-pub struct WorkerRuntime<M, T, A, W> {
+pub struct WorkerRuntime<M, C, W> {
     model: Arc<M>,
-    broker: Arc<CapabilityBroker<T, A>>,
+    capabilities: Arc<C>,
     workbench: Arc<W>,
     max_steps: usize,
     max_malformed_actions: usize,
     observation_limits: ObservationLimits,
 }
 
-impl<M, T, A, W> WorkerRuntime<M, T, A, W>
+impl<M, C, W> WorkerRuntime<M, C, W>
 where
     M: ModelGateway + 'static,
-    T: CapabilityTranslator + 'static,
-    A: TicketAuthorityStore + 'static,
+    C: CapabilityClient + 'static,
     W: LocalWorkbench + 'static,
 {
-    pub fn new(model: Arc<M>, broker: Arc<CapabilityBroker<T, A>>, workbench: Arc<W>) -> Self {
+    pub fn new(model: Arc<M>, capabilities: Arc<C>, workbench: Arc<W>) -> Self {
         Self {
             model,
-            broker,
+            capabilities,
             workbench,
             max_steps: DEFAULT_MAX_STEPS,
             max_malformed_actions: DEFAULT_MAX_MALFORMED_ACTIONS,
@@ -513,8 +508,8 @@ where
                     // Only identity and intent cross this boundary. The broker resolves
                     // what this ticket may do from its own trusted source.
                     let result = self
-                        .broker
-                        .execute(&CapabilityRequest {
+                        .capabilities
+                        .request(&CapabilityRequest {
                             worker_id,
                             ticket_id: ticket.id,
                             request,
@@ -929,7 +924,9 @@ mod tests {
     // ---- runtime loop ----
 
     use agent_protocol::{AuthorityEnvelope, ConversationId};
-    use capability_broker::{CapabilityDescriptor, InMemoryTicketAuthorityStore, SlmTranslator};
+    use capability_broker::{
+        CapabilityBroker, CapabilityDescriptor, InMemoryTicketAuthorityStore, SlmTranslator,
+    };
     use std::sync::Mutex;
     use uuid::Uuid;
 
@@ -966,8 +963,7 @@ mod tests {
 
     type TestRuntime = WorkerRuntime<
         ScriptedModel,
-        SlmTranslator<ScriptedModel>,
-        InMemoryTicketAuthorityStore,
+        CapabilityBroker<SlmTranslator<ScriptedModel>, InMemoryTicketAuthorityStore>,
         FsProcessWorkbench,
     >;
 
