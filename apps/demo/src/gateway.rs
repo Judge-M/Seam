@@ -1,9 +1,9 @@
 //! Model wiring for the demo.
 //!
-//! The demo runs in one of two modes. With `SEAM_MODEL_BASE_URL` set it talks to a real
-//! OpenAI-compatible endpoint (LiteLLM Proxy, or anything speaking that shape). Without
-//! it, a scripted gateway replays a fixed conversation so the whole architecture can be
-//! run end to end with no credentials and no network.
+//! The demo runs in one of two modes. With `SEAM_MODEL_BASE_URL` set it uses the included
+//! chat-completions HTTP adapter. Without it, a scripted gateway replays a fixed
+//! conversation so the whole architecture can be run end to end with no credentials and
+//! no network. This adapter is a demo composition choice, not a core dependency.
 //!
 //! The scripted mode is deliberately a *model* stand-in, not a Seam stand-in: every other
 //! component below is the real one, so what you see is the real kernel, broker, policy
@@ -12,7 +12,8 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use model_gateway::{LiteLlmClient, ModelError, ModelGateway, ModelRequest};
+use model_gateway::{ModelError, ModelGateway, ModelRequest};
+use model_gateway_chat_completions::ChatCompletionsClient;
 
 /// Which model a request is going to, so the demo can narrate the seam being crossed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +84,7 @@ impl ModelGateway for ScriptedGateway {
 /// One gateway type so the rest of the wiring is identical in both modes.
 pub enum DemoGateway {
     Scripted(ScriptedGateway),
-    Live(LiteLlmClient),
+    Live(ChatCompletionsClient),
 }
 
 #[async_trait]
@@ -119,7 +120,7 @@ impl LiveConfig {
 /// Build a gateway for one role: live when configured, scripted otherwise.
 pub fn gateway_for(role: Role, live: Option<&LiveConfig>, script: Vec<String>) -> DemoGateway {
     match live {
-        Some(config) => DemoGateway::Live(LiteLlmClient::new(
+        Some(config) => DemoGateway::Live(ChatCompletionsClient::new(
             config.base_url.clone(),
             config.api_key.clone(),
             config.model_for(role),

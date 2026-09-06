@@ -95,6 +95,10 @@ Provider compatibility, durable workflows, memory storage/retrieval algorithms, 
 
 Seam should own policies and semantic contracts, not duplicate mature infrastructure without evidence.
 
+Shared ports must not expose a vendor SDK type, transport-client error, deployment product,
+or adapter-specific wire field. Concrete adapters translate at the edge and are selected by
+the composition root. Products named in examples or evaluations are candidates, not defaults.
+
 ## 14. UI Is a Client
 
 The UI renders conversations, work, approvals, artifacts and events. It does not decide how work is decomposed, what model runs it, or which provider executes a capability.

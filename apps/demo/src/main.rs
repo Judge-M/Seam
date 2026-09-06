@@ -12,7 +12,7 @@
 //!
 //! By default no credentials or network are needed: the three models are scripted. Set
 //! `SEAM_MODEL_BASE_URL` (plus optional `SEAM_MODEL_API_KEY`) to run the identical wiring
-//! against a real OpenAI-compatible endpoint such as LiteLLM Proxy.
+//! through the demo's chat-completions HTTP adapter.
 
 mod gateway;
 mod support;
@@ -36,7 +36,7 @@ use support::{
     PrintingSink, RecordingMemory,
 };
 
-/// Stand-in for a real search provider. Swapping this for Exa/Brave/an MCP server is the
+/// Stand-in for a real search provider. Swapping this for any provider adapter is the
 /// only change needed to make the capability real — no worker or prompt changes.
 struct DemoSearchProvider;
 
@@ -65,7 +65,7 @@ impl CapabilityProvider for DemoSearchProvider {
                     "snippet": "The 2024 edition stabilises if-let chains and RPIT lifetime capture."
                 }
             ],
-            "note": "Demo provider; replace with Brave/Exa/SearXNG/MCP/etc.",
+            "note": "Demo provider; replace with any implementation of the provider port.",
             "echoed_arguments": arguments
         }))
     }
