@@ -133,7 +133,7 @@ pub struct ConversationProjection {
 }
 
 /// Read-side seam for initial page loads, reconnects, CLI inspection, and alternate UIs.
-/// A production implementation can be backed by Postgres or a projection/event store.
+/// A production implementation can be backed by any database or projection/event store.
 #[async_trait]
 pub trait ReadModel: Send + Sync {
     async fn conversation(

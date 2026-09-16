@@ -109,11 +109,14 @@ The orchestrator must remain tool-blind.
 
 Integrate a durable workflow/runtime rather than recreating one.
 
-Evaluate at minimum:
+Evaluate multiple implementations against the requirements below. Initial candidates include:
 
 - Restate;
 - DBOS;
 - Temporal only if the additional complexity is justified.
+
+These are evaluation candidates, not architectural dependencies. The kernel contract must
+remain independent of the selected runtime.
 
 Requirements:
 

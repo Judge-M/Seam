@@ -2,6 +2,7 @@
 members = [
   "crates/protocol",
   "crates/model-gateway",
+  "crates/model-gateway-chat-completions",
   "crates/capability-broker",
   "crates/worker-runtime",
   "crates/orchestration-kernel",

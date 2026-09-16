@@ -183,7 +183,7 @@ Example:
 
 ```text
 provider failure:
-  github-mcp socket error / HTTP 503
+  provider socket error / transport status 503
 
 worker-facing failure:
   CAPABILITY_TEMPORARILY_UNAVAILABLE

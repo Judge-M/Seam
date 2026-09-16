@@ -89,7 +89,7 @@ Responsibilities:
 - persist/reconstruct conversation state;
 - retrieve permitted durable memory;
 - assemble orchestrator context;
-- invoke the selected frontier model through a model gateway;
+- submit inference through a model gateway;
 - interpret orchestration-control outputs;
 - create/update/cancel work tickets;
 - receive worker completion/failure events;
@@ -114,7 +114,8 @@ It may reason about:
 - contradictions;
 - what deserves durable retention.
 
-It must not receive operational tools such as shell, browser, GitHub, databases, MCP, or cloud APIs.
+It must not receive operational tools such as shell, browser, code-hosting services,
+databases, MCP, or cloud APIs.
 
 Its model-visible control surface should remain small, e.g.:
 
@@ -129,6 +130,21 @@ memory.propose_write
 ```
 
 Exact functions may evolve; the invariant is that the orchestrator has **control-plane authority, not operational authority**.
+
+### 4.1 Model access seam
+
+The orchestrator, workers and broker translator depend only on the shared `ModelGateway`
+contract. A deployment injects an adapter at its composition root; that adapter may use a
+remote API, local server, in-process model, gateway/proxy, or deterministic fixture.
+
+The contract expresses Seam-level intent such as conversational roles and the requested
+output shape. Provider SDK types, HTTP-client errors, endpoint paths and wire-protocol fields
+belong inside adapters. The included chat-completions HTTP adapter is used by the demo only
+and does not define the architecture or constrain other adapters.
+
+Seam never selects or names a model. `ModelRequest` carries no model identifier, and tickets
+cannot request one. Selection, routing, fallback and provider policy are the gateway's
+responsibility; Seam supplies only the semantic inference request.
 
 ## 5. Tickets
 
@@ -206,7 +222,7 @@ Examples:
 - network access;
 - web search/fetch/render;
 - MCP;
-- remote Git/GitHub;
+- remote repositories and code-hosting services;
 - SaaS APIs;
 - databases outside the sandbox;
 - cloud control planes;

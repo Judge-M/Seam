@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 agent-protocol = { path = "../../crates/protocol" }
 model-gateway = { path = "../../crates/model-gateway" }
+model-gateway-chat-completions = { path = "../../crates/model-gateway-chat-completions" }
 capability-broker = { path = "../../crates/capability-broker" }
 worker-runtime = { path = "../../crates/worker-runtime" }
 orchestration-kernel = { path = "../../crates/orchestration-kernel" }

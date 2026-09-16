@@ -127,7 +127,7 @@ Workers must use the Capability Broker for:
 ```text
 web/search/browsing
 MCP
-remote Git/GitHub
+remote repositories / code-hosting services
 SaaS APIs
 email/chat
 remote databases
@@ -325,9 +325,9 @@ Seam is intentionally not trying to reimplement generic infrastructure.
 Expected seams include:
 
 ```text
-Model gateway          LiteLLM or equivalent
+Model access           deployment-selected ModelGateway adapter
 Memory mechanics       external/self-hosted memory service
-Durable execution      Restate / DBOS / Temporal-class runtime
+Durable execution      deployment-selected durable runtime adapter
 Conversation storage   durable database / event log
 Capability providers   MCP / APIs / native services
 Presentation           any client over orchestration-api
@@ -354,7 +354,9 @@ Everything else should remain replaceable where practical.
 ```text
 crates/
 ├── protocol/               shared tickets, authority and result types
-├── model-gateway/          model abstraction + LiteLLM-compatible client
+├── model-gateway/          provider-neutral model contract
+├── model-gateway-chat-completions/
+│                           optional HTTP chat-completions adapter
 ├── orchestration-kernel/   primary context, ticket and memory policy seam
 ├── orchestration-api/      versioned client command/event/read seam
 ├── worker-runtime/         tiny task-scoped worker loop + local workbench
@@ -377,7 +379,8 @@ docs/
 The prototype currently includes:
 
 - shared protocol types for tickets, authority, capabilities and worker reports;
-- a model-gateway abstraction with a LiteLLM-compatible implementation;
+- a provider-neutral model-gateway contract;
+- a separate, optional chat-completions HTTP adapter used by the demo;
 - a tool-blind orchestration kernel;
 - a tiny worker runtime;
 - workspace-local file/process primitives;
@@ -431,17 +434,20 @@ No credentials or network are required. In this default mode the three model cal
 one** - the real kernel, authority policy, broker, schema validation and worker loop are
 what execute.
 
-To run the same wiring against a real OpenAI-compatible endpoint such as
-[LiteLLM Proxy](https://github.com/BerriAI/litellm):
+To run the same wiring through the demo's included chat-completions HTTP adapter:
 
 ```bash
-export SEAM_MODEL_BASE_URL=http://localhost:4000
-export SEAM_MODEL_API_KEY=...            # optional
-export SEAM_ORCHESTRATOR_MODEL=...       # default: orchestrator-model
-export SEAM_WORKER_MODEL=...             # default: worker-model
-export SEAM_BROKER_MODEL=...             # default: small-tool-model
+export SEAM_MODEL_GATEWAY_URL=http://localhost:4000
+export SEAM_MODEL_GATEWAY_API_KEY=...     # optional
 cargo run -p agent-architecture-demo
 ```
+
+The endpoint is a gateway or proxy configured to own model routing. Seam sends no model
+identifier: selection, routing, fallback and provider policy belong entirely behind that
+boundary. Seam's kernel, workers, tickets and broker neither choose nor name models. Other
+serving protocols can implement `ModelGateway` in sibling adapter crates; the demo adapter
+is an example, not a required deployment component. LiteLLM can participate in such a
+deployment, but it is not a Seam dependency or preferred path.
 
 What the run demonstrates:
 

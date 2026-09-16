@@ -70,10 +70,10 @@ pub struct CapabilityInvocation {
 
 /// What the worker sees when a capability succeeds.
 ///
-/// Deliberately no provider field: which of Exa/GitHub-MCP/a REST adapter served the
-/// call is the broker's operational business, and a worker that can read it is a worker
-/// that can start depending on it. The broker records the provider in its telemetry and
-/// audit log instead.
+/// Deliberately no provider field: which concrete adapter served the call is the broker's
+/// operational business, and a worker that can read it is a worker that can start
+/// depending on it. The broker records the provider in its telemetry and audit log
+/// instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityResult {
     pub capability: String,
