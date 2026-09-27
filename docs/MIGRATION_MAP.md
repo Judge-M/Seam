@@ -15,7 +15,7 @@ This map was made from the current `Judge-M/Seam` `main` source before extractio
 | `apps/demo` | Shared concept requiring redesign | Replace the coupled monolith demo with independent SDK and Engine fixtures and an optional combined adapter example. |
 | `docs/SECURITY.md` | Umbrella Seam; adapted details in both products | Preserve trust boundaries and caveats, update the topology and ownership. |
 | `docs/ARCHITECTURE.md`, root `ARCHITECTURE.md`, `docs/DESIGN_PRINCIPLES.md`, `docs/ROADMAP.md`, `README.md` | Umbrella Seam | Rewrite outdated broker SLM, provider-selection, and monolithic-runtime descriptions for the three-layer target. |
-| `.github/workflows/ci.yml`, `.gitignore`, `LICENSE-MIT`, `LICENSE-APACHE` | All three repositories | Retain dual MIT/Apache-2.0 licensing and independent formatting, lint, and test gates. |
+| `.github/workflows/ci.yml`, `.gitignore`, `LICENSE` | All three repositories | Use Apache-2.0 and independent formatting, lint, and test gates. |
 | `Cargo.toml`, `Cargo.lock` | Split per product | Build each implementation independently. Umbrella becomes documentation and integration guidance, not a core Rust workspace. |
 
 ## Coupling and security findings

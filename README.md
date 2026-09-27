@@ -23,4 +23,4 @@ The user's gateway remains responsible for concrete model/tool/provider executio
 
 This repository holds the [architecture](docs/ARCHITECTURE.md), [principles](docs/DESIGN_PRINCIPLES.md), [terminology](docs/TERMINOLOGY.md), [rationale](docs/RATIONALE.md), [trust boundaries](docs/SECURITY.md), [migration map](docs/MIGRATION_MAP.md), and [optional combined example](examples/combined). It is the umbrella specification, rather than a monolithic Rust runtime.
 
-Dual licensed under MIT or Apache-2.0.
+Licensed under Apache-2.0. See [LICENSE](LICENSE).
